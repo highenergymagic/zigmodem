@@ -3,11 +3,18 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        curve32: ["OFF", "ON"]
+    env:
+      UBSAN_OPTIONS: halt_on_error=1
+      ASAN_OPTIONS: detect_leaks=1
     steps:
       - uses: actions/checkout@v4
       - name: Configure with sanitizers
         run: >-
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DZM_CURVE32=${{ matrix.curve32 }}
           -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
       - run: cmake --build build
       - run: ctest --test-dir build --output-on-failure

@@ -36,3 +36,10 @@
 &radio { status = "okay"; };
 &ieee802154 { status = "okay"; };
 &ieee802154g { status = "disabled"; };
+&flash0 {
+    partitions {
+        compatible = "fixed-partitions";
+        #address-cells = <1>; #size-cells = <1>;
+        storage_partition: partition@50000 { label = "storage"; reg = <0x50000 0x4000>; };
+    };
+};

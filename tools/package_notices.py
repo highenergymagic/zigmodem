@@ -22,16 +22,18 @@ for path in sorted(files):
     if not path.is_relative_to(root) or not path.is_file():
         continue
     relative = path.relative_to(root).as_posix()
-    if not relative.startswith(("zephyr/", "modules/")):
+    if not relative.startswith(("zephyr/", "modules/", "vendor/")):
         continue
     text = path.read_text(errors="replace")
     match = re.match(r"\s*(/\*.*?\*/)", text, re.DOTALL)
     if match:
         notices.setdefault(match[1], []).append(relative)
 with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+    archive.write(root / "LICENSE", "LICENSE")
+    archive.write(root / "vendor/SOURCES.txt", "vendor/SOURCES.txt")
     archive.writestr("source-notices.txt", "\n\n".join(
         "\n".join(paths) + "\n" + notice for notice, paths in notices.items()))
-    for base in (root / "zephyr", root / "modules"):
+    for base in (root / "zephyr", root / "modules", root / "vendor"):
         for path in base.rglob("*"):
             if path.is_file() and (path.name.lower().startswith(("license", "copying", "notice"))
                                    or "LICENSES" in path.parts):

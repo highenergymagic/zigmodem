@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "modem.h"
+#include "secure.h"
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/hwinfo.h>
@@ -19,10 +20,15 @@ static const struct device *radio=DEVICE_DT_GET(DT_CHOSEN(zephyr_ieee802154));
 static const struct ieee802154_radio_api *api;
 static struct net_if *iface;
 static struct zm_modem modem;
+static struct zs_link secure;
+extern int identity_load(uint8_t key[32]);
 static uint8_t mac_seq;
 RING_BUF_DECLARE(serial_rx_queue,8192);
 RING_BUF_DECLARE(serial_tx_queue,4096);
 static atomic_t overrun;
+static atomic_t flow_enabled, host_paused, flow_pending;
+static bool input_paused;
+static unsigned tx_fail_streak;
 struct rx_frame { uint8_t bytes[127]; uint8_t len; int16_t rssi; };
 K_MSGQ_DEFINE(radio_rx,sizeof(struct rx_frame),8,4);
 
@@ -33,10 +39,22 @@ static void uart_isr(const struct device *dev,void *ctx) {
         if(!uart_irq_is_pending(dev)) break;
         if(uart_irq_rx_ready(dev)) {
             uint8_t bytes[32]; int n;
-            while((n=uart_fifo_read(dev,bytes,sizeof(bytes)))>0)
-                if(ring_buf_put(&serial_rx_queue,bytes,n)!=(uint32_t)n) atomic_set(&overrun,1);
+            while((n=uart_fifo_read(dev,bytes,sizeof(bytes)))>0) {
+                for(int i=0;i<n;i++) {
+                    if(atomic_get(&flow_enabled) && (bytes[i]==0x11 || bytes[i]==0x13)) {
+                        atomic_set(&host_paused,bytes[i]==0x13);
+                        if(bytes[i]==0x11) uart_irq_tx_enable(dev);
+                    } else if(ring_buf_put(&serial_rx_queue,bytes+i,1)!=1) atomic_set(&overrun,1);
+                }
+            }
         }
         if(uart_irq_tx_ready(dev)) {
+            uint8_t control=(uint8_t)atomic_get(&flow_pending);
+            if(control) {
+                if(uart_fifo_fill(dev,&control,1)==1) atomic_cas(&flow_pending,control,0);
+                continue;
+            }
+            if(atomic_get(&host_paused)) { uart_irq_tx_disable(dev); continue; }
             uint8_t bytes[32]; uint32_t n=ring_buf_peek(&serial_tx_queue,bytes,sizeof(bytes));
             if(!n) uart_irq_tx_disable(dev);
             else { int sent=uart_fifo_fill(dev,bytes,n);
@@ -68,21 +86,48 @@ static int l2_enable(struct net_if *dev,bool state) { ARG_UNUSED(dev); ARG_UNUSE
 static enum net_l2_flags l2_flags(struct net_if *dev) { ARG_UNUSED(dev); return NET_L2_MULTICAST; }
 NET_L2_INIT(CUSTOM_IEEE802154_L2,l2_recv,l2_send,l2_enable,l2_flags);
 
-static void radio_out(void *ctx,const uint8_t *p,size_t n) {
+static void wire_out(void *ctx,const uint8_t *p,size_t n) {
     ARG_UNUSED(ctx);
-    uint8_t f[MAC_HEADER+ZM_FRAME];
+    uint8_t f[MAC_HEADER+ZS_WIRE_MAX];
     sys_put_le16(0xc841,f); f[2]=mac_seq++;
     sys_put_le16(PAN,f+3); sys_put_le16(0xffff,f+5);
     sys_put_le64(modem.number,f+7); memcpy(f+MAC_HEADER,p,n);
     struct net_pkt *pkt=net_pkt_alloc_with_buffer(iface,n+MAC_HEADER,NET_AF_UNSPEC,0,K_NO_WAIT);
     if(!pkt) { modem.radio_errors++; return; }
-    if(!net_pkt_write(pkt,f,n+MAC_HEADER))
-        if(api->tx(radio,IEEE802154_TX_MODE_CSMA_CA,pkt,pkt->frags)) modem.radio_errors++;
+    if(!net_pkt_write(pkt,f,n+MAC_HEADER)) {
+        if(api->tx(radio,IEEE802154_TX_MODE_CSMA_CA,pkt,pkt->frags)) { modem.radio_errors++; tx_fail_streak++; }
+        else tx_fail_streak=0;
+    }
     net_pkt_unref(pkt);
 #if defined(CONFIG_SOC_CC2652P)
     extern uint32_t zigmodem_ti_status(const struct device *dev);
     modem.radio_status=zigmodem_ti_status(radio);
 #endif
+}
+static void radio_out(void *ctx,const uint8_t *p,size_t n) {
+    ARG_UNUSED(ctx); zs_send(&secure,p,n,modem.peer_identity);
+}
+static void plain_in(void *ctx,const uint8_t *p,size_t n) {
+    ARG_UNUSED(ctx);
+    if(n>=ZM_HEADER && p[3]==ZM_CALL) memcpy(modem.peer_identity,secure.remote_id,16);
+    zm_receive(&modem,p,n);
+}
+static bool accept_call(void *ctx) { ARG_UNUSED(ctx); return modem.state==ZM_IDLE; }
+static bool change_channel(void *ctx,unsigned channel) {
+    ARG_UNUSED(ctx);
+    /* TI's same-channel setter does not restart a stopped receiver. */
+    if(channel==modem.channel) return true;
+    /* Only anchor once a peer has responded. Elliptic-curve work on the
+     * Cortex-M can span several scheduler ticks; don't hop mid-handshake. */
+    if(tx_fail_streak<4 && ((!secure.initiator && secure.hs) || secure.stage==3 ||
+       (secure.stage==1 && secure.assembly_mask))) return false;
+    /* EFR32 applies current_channel only when RX starts. TI start is a no-op,
+     * while its set_channel restarts RX. Stop/set/start supports both. */
+    if(api->stop(radio)) return false;
+    int result=api->set_channel(radio,channel);
+    int restarted=api->start(radio);
+    if(result==0 && restarted==0) { tx_fail_streak=0; return true; }
+    return false;
 }
 static void fatal(const char *s) {
     while(*s) uart_poll_out(uart,*s++);
@@ -94,26 +139,38 @@ int main(void) {
     api=(const struct ieee802154_radio_api *)radio->api;
     iface=net_if_lookup_by_dev(radio);
     if(!iface) fatal("\r\nRADIO INTERFACE ERROR\r\n");
-    uint64_t number=0,nonce;
-#if defined(CONFIG_SOC_CC2652P)
-    /* Driver reads the factory IEEE address, with CCFG override if configured. */
-    const struct net_linkaddr *addr=net_if_get_link_addr(iface);
-    if(addr->len==8) number=sys_get_be64(addr->addr);
-#else
-    uint8_t id[8];
-    if(hwinfo_get_device_id(id,sizeof(id))==sizeof(id)) number=sys_get_be64(id);
-#endif
-    if(!number || sys_csrand_get(&nonce,sizeof(nonce))) fatal("\r\nIDENTITY/ENTROPY ERROR\r\n");
-    zm_init(&modem,number,nonce,(struct zm_io){NULL,radio_out,serial_out});
+    uint64_t nonce; uint8_t key[32];
+    if(identity_load(key) || !zs_init(&secure,key,(struct zs_io){NULL,wire_out,plain_in,accept_call}) ||
+       sys_csrand_get(&nonce,sizeof(nonce))) fatal("\r\nIDENTITY/ENTROPY ERROR\r\n");
+    noise_clean(key,sizeof(key));
+    zm_init(&modem,secure.number,nonce,(struct zm_io){NULL,radio_out,serial_out});
+    zm_set_identity(&modem,secure.identity);
     struct ieee802154_filter filter={.pan_id=PAN};
     if(api->filter(radio,true,IEEE802154_FILTER_TYPE_PAN_ID,&filter)) fatal("\r\nPAN ERROR\r\n");
     filter.short_addr=0xfffe;
     if(api->filter(radio,true,IEEE802154_FILTER_TYPE_SHORT_ADDR,&filter)) fatal("\r\nADDRESS ERROR\r\n");
     if(api->set_channel(radio,CHANNEL) || api->set_txpower(radio,5) || api->start(radio))
         fatal("\r\nRADIO START ERROR\r\n");
+    zm_enable_link(&modem,(struct zm_link_ops){NULL,change_channel});
     uart_irq_callback_user_data_set(uart,uart_isr,NULL); uart_irq_rx_enable(uart);
     uint8_t input[128]; size_t pending=0;
     for(;;) {
+        bool enabled=modem.software_flow;
+        atomic_set(&flow_enabled,enabled);
+        if(!enabled && atomic_cas(&host_paused,1,0)) uart_irq_tx_enable(uart);
+        size_t queued=ring_buf_size_get(&serial_rx_queue)+modem.qlen;
+        bool pause=enabled && (input_paused?queued>1024:queued>4096);
+        if(pause!=input_paused) {
+            input_paused=pause; atomic_set(&flow_pending,pause?0x13:0x11); uart_irq_tx_enable(uart);
+        }
+        secure.compression=modem.compression;
+        modem.authenticated_frames=secure.authenticated;
+        modem.rejected_frames=secure.rejected;
+        modem.compression_saved=secure.compression_saved;
+        modem.secure_stage=secure.stage;
+        modem.wire_rx=secure.wire_rx; modem.invalid_wire=secure.invalid_wire;
+        modem.wire_type=secure.last_type; modem.wire_length=secure.last_length;
+        zs_tick(&secure,k_uptime_get());
         zm_tick(&modem,k_uptime_get());
         if(atomic_cas(&overrun,1,0)) { zm_overrun(&modem); pending=0;
             unsigned key=irq_lock(); ring_buf_reset(&serial_rx_queue); irq_unlock(key); }
@@ -123,7 +180,7 @@ int main(void) {
                sys_get_le16(f.bytes+3)==PAN && sys_get_le16(f.bytes+5)==0xffff &&
                !memcmp(f.bytes+7,f.bytes+MAC_HEADER+4,8)) {
                 modem.last_rssi=f.rssi;
-                zm_receive(&modem,f.bytes+MAC_HEADER,f.len-MAC_HEADER);
+                zs_receive(&secure,f.bytes+MAC_HEADER,f.len-MAC_HEADER);
             }
         }
         if(!pending) { unsigned key=irq_lock(); pending=ring_buf_get(&serial_rx_queue,input,sizeof(input)); irq_unlock(key); }

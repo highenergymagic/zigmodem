@@ -117,3 +117,13 @@ uint32_t zigmodem_ti_status(const struct device *dev)
 }
 '''
     path.write_text(source)
+
+# CCA mode 3 requires energy AND correlation, not OR. Match TI's OpenThread
+# reference configuration; sync detection still always marks the channel busy.
+source = path.read_text()
+old = "\t\t\t.ccaCorrOp = 0,"
+new = "\t\t\t.ccaCorrOp = 1, /* CCA mode 3: energy AND correlation */"
+if new not in source:
+    if source.count(old) != 1:
+        raise SystemExit("Unexpected TI CCA correlation operator")
+    path.write_text(source.replace(old, new))

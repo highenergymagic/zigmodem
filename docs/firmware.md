@@ -26,6 +26,9 @@ lifetime of its link-address buffer, and SONOFF's TI crystal load trim
 It also resets TI's CSMA in/out backoff fields for each transmission and
 exposes its command status for diagnostics. It refuses unexpected source patterns
 and can be rerun. These changes are not upstreamed yet.
+The TI receive CCA correlation operator is corrected from OR to AND to match
+its declared CCA mode 3 and TI's reference driver. This removed repeated
+channel-busy transmit failures in the hardware qualification.
 
 ## ZBDongle-P
 
@@ -36,7 +39,7 @@ Use the USB bridge's SONOFF-specific reset sequence.
 ```sh
 pip install cc2538-bsl pyserial
 python tools/backup_ti.py /dev/ttyUSB1 /safe/private/location/original-ti.bin
-cc2538-bsl -p /dev/ttyUSB1 --bootloader-sonoff-usb -ewv build-p/zephyr/zephyr.hex
+python tools/upgrade_ti.py /dev/ttyUSB1 build-p/zephyr/zephyr.hex
 python tools/serial_probe.py /dev/ttyUSB1
 ```
 
@@ -46,16 +49,24 @@ application can update NV counters at boot, so a later whole-flash CRC can
 differ from a correct backup. Backups may contain network keys: keep them
 private and out of Git.
 
-Restore a verified full binary with the same `-ewv` command, replacing the
-HEX path with the backup path. This erases flash, writes the backup, verifies
-it, and restarts the device. Keep the original CCFG intact in a recovery image.
+To restore a verified full backup intentionally, use
+`cc2538-bsl -p /dev/ttyUSB1 -evw --bootloader-sonoff-usb /safe/private/location/original-ti.bin`.
+This erases flash, writes the backup and verifies it; reset the device afterward.
+It replaces the identity too. Keep the original CCFG intact in a recovery image.
+
+Version 0.2 reserves `0x50000..0x53fff` for identity storage. Its application
+region ends before this; CCFG remains at the chip's original address. The
+upgrade helper erases/writes only populated 8 KiB HEX pages and verifies the
+storage CRC is unchanged. **Do not mass erase for normal upgrades.** A full
+restore or mass erase intentionally discards the current cryptographic identity.
 
 ## ZBDongle-E
 
 EFR32MG21A020F768, 768 KiB flash, 64 KiB SRAM. UART USART0 PB0 RX / PB1 TX.
 The application UART runs at 9600 baud; the Gecko bootloader still uses 115200.
 At 115200, hardware RX overruns occurred during real duplex radio transfers.
-The interrupt-driven UART backend does not yet use DMA or flow control.
+The interrupt-driven UART backend does not yet use DMA or hardware flow control.
+Optional software XON/XOFF flow control is available with `AT&K4`.
 Zephyr's A-series device declaration names the 1024 KiB variant; this board
 explicitly constrains flash and RAM to the smaller physical chip. HFXO CTUNE
 140 matches the inspected SONOFF firmware configuration; board revisions may
@@ -78,6 +89,22 @@ python tools/serial_probe.py /dev/ttyUSB0
 The packaging tool validates the vector table, appends Gecko application
 properties, sets vector word 13, and asks Commander to add the application
 CRC and construct the GBL. It never includes bootloader bytes.
+Version 0.2 reserves `0xb8000..0xbbfff` for identity storage. The application
+link region ends at `0xb8000`; application-only upgrades preserve this partition.
+
+## Persistent identity
+
+Each device creates a private X25519 key using hardware entropy on its first
+0.2 boot, saves it with Zephyr NVS data CRC, and reads it back before use.
+Subsequent boots use that key. `AT&F` does not delete it. Missing storage
+initializes a new identity; corrupt/unreadable key records fail startup rather
+than silently substituting a new key. The key is not embedded in build outputs,
+published firmware, or repository files. Both actual boards retained their
+phone numbers across repeated application upgrades during development.
+
+The key is stored in ordinary flash, not a hardware secure element. Recovery
+and debug access remain available; this does not provide physical-tamper security.
+Losing/erasing the identity partition changes the phone number.
 
 The tested CP2102N-based V2 board supports `rts_dtr` bootloader entry. Other
 revisions may require the physical BOOT button. Verify entry before replacing
@@ -93,9 +120,11 @@ Zigmodem's MIT license applies to this repository's own code. Keep the
 `third-party-notices.zip` release asset with redistributed firmware. To collect
 dependency license files and notices from both completed build trees, run
 `python tools/package_notices.py /path/to/build-workspace third-party-notices.zip`.
-The build workspace must contain `build-p`, `build-e`, `zephyr`, and `modules`.
+The build workspace must contain `build-p`, `build-e`, `zephyr`, `modules`,
+`vendor`, and this project's `LICENSE`.
 
 - [TI board mapping and bootloader pin](https://github.com/Koenkk/Z-Stack-firmware/blob/master/coordinator/Z-Stack_3.x.0/README.md)
+- [TI reference CCA configuration](https://github.com/openthread/ot-cc13x2-cc26x2/blob/bdcd288ae64937172ec187415ed768875177f272/src/cc2652/radio.c#L263)
 - [SONOFF E board configuration](https://github.com/darkxst/silabs-firmware-builder/blob/SiSDK/manifests/sonoff/zbdonglee_zigbee_ncp.yaml)
 - [Gecko application memory layout](https://docs.silabs.com/mcu-bootloader/3.3.2/bootloader-fundamentals/03-memory-space-for-bootloading)
 - [Gecko application properties](https://github.com/SiliconLabs/gecko_sdk/blob/gsdk_4.4/platform/bootloader/api/application_properties.h)

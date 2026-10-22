@@ -4,6 +4,18 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+static const unsigned rates[]={300,1200,2400,4800,9600};
+static const unsigned channels[]={25,15,20,26,11};
+static void train(struct zm_modem *m) {
+    m->training=true; m->probes=m->probe_acks=m->last_probe_ack=0; m->train_at=m->now; m->probe_at=0;
+    m->successes=m->failures=0; m->retrains++;
+    m->profile=m->peer_max<m->max_profile?m->peer_max:m->max_profile;
+    m->probe_base=m->probe_seq; m->probe_mask=0;
+}
+void zm_enable_link(struct zm_modem *m,struct zm_link_ops link) {
+    m->advanced=true; m->link=link; m->channel=25; m->max_profile=m->peer_max=4;
+    m->profile=2; m->adaptive=true; m->compression=true;
+}
 
 static void put(uint8_t *p, uint64_t v, unsigned n) {
     for (unsigned i=0; i<n; i++) { p[i]=(uint8_t)v; v >>= 8; }
@@ -19,7 +31,8 @@ static void result(struct zm_modem *m, unsigned code) {
                                        "", "NO DIALTONE", "BUSY", "NO ANSWER"};
     char s[40];
     if (m->quiet) return;
-    if (m->verbose) snprintf(s,sizeof(s),"\r\n%s\r\n", names[code]);
+    if (m->verbose && code==1 && m->advanced) snprintf(s,sizeof(s),"\r\nCONNECT %u\r\n",rates[m->profile]);
+    else if (m->verbose) snprintf(s,sizeof(s),"\r\n%s\r\n", names[code]);
     else snprintf(s,sizeof(s),"%u\r",code);
     emit(m,s);
 }
@@ -33,11 +46,15 @@ static void send_to(struct zm_modem *m, unsigned type, uint64_t dst, uint64_t se
     m->io.radio(m->io.ctx,f,ZM_HEADER+n);
 }
 static void send(struct zm_modem *m, unsigned type) {
-    send_to(m,type,m->peer,m->session,0,NULL,0);
+    if(m->advanced && (type==ZM_CALL || type==ZM_ACCEPT)) {
+        uint8_t caps[3]={2,(uint8_t)m->max_profile,(uint8_t)m->min_profile};
+        send_to(m,type,m->peer,m->session,0,caps,sizeof(caps));
+    } else send_to(m,type,m->peer,m->session,0,NULL,0);
 }
 static void clear_stream(struct zm_modem *m) {
     m->qhead=m->qlen=m->pending_len=0; m->inflight=false;
     m->tx_seq=m->rx_seq=0; m->escape_count=0; m->command_len=0; m->overflow=false;
+    m->connect_pending=false; m->recovering=false; m->training=false;
 }
 static void idle(struct zm_modem *m) {
     m->state=ZM_IDLE; m->online=false; clear_stream(m);
@@ -50,12 +67,16 @@ static void close_call(struct zm_modem *m, bool report) {
     if(report) result(m,3);
 }
 static void connected(struct zm_modem *m) {
-    m->state=ZM_CONNECTED; m->online=true; m->last_rx=m->last_ping=m->now;
-    m->last_input=m->now; result(m,1);
+    m->state=ZM_CONNECTED; m->online=!m->advanced; m->last_rx=m->last_ping=m->now;
+    m->last_input=m->now;
+    m->connect_pending=m->advanced;
+    if(m->advanced) train(m); else result(m,1);
 }
 static void defaults(struct zm_modem *m) {
     m->echo=true; m->verbose=true; m->quiet=false;
     m->autoanswer=0; m->dial_seconds=30; m->guard_ms=1000;
+    m->software_flow=false;
+    if(m->advanced) { m->min_profile=0; m->max_profile=4; m->adaptive=true; m->compression=true; }
 }
 void zm_init(struct zm_modem *m, uint64_t number, uint64_t nonce, struct zm_io io) {
     memset(m,0,sizeof(*m)); m->number=number; m->nonce=nonce; m->io=io; defaults(m);
@@ -75,6 +96,24 @@ static bool decimal(const char **p, uint64_t *value) {
 static void answer(struct zm_modem *m) {
     m->state=ZM_ANSWERING; m->last_control=m->now; send(m,ZM_ACCEPT);
 }
+void zm_set_identity(struct zm_modem *m,const uint8_t identity[16]) {
+    memcpy(m->identity,identity,16); m->secure_identity=true; m->number=get(identity,8);
+}
+static bool hex_identity(const char *p,uint8_t id[16]) {
+    if(strlen(p)!=32) return false;
+    for(unsigned i=0;i<16;i++) {
+        unsigned value=0;
+        for(unsigned j=0;j<2;j++) {
+            unsigned c=(unsigned char)*p++,digit;
+            if(c>='0' && c<='9') digit=c-'0';
+            else if(c>='A' && c<='F') digit=c-'A'+10;
+            else return false;
+            value=value*16+digit;
+        }
+        id[i]=(uint8_t)value;
+    }
+    return true;
+}
 static void command(struct zm_modem *m) {
     char *s=m->command; char out[200]; uint64_t n;
     s[m->command_len]=0;
@@ -86,7 +125,11 @@ static void command(struct zm_modem *m) {
         if(c==' ') continue;
         if(c=='+') {
             if(strcmp(p,"PHONUM?")==0) {
-                snprintf(out,sizeof(out),"\r\n%" PRIu64 "\r\n",m->number); emit(m,out);
+                if(m->secure_identity) {
+                    emit(m,"\r\n");
+                    for(unsigned i=0;i<16;i++) { snprintf(out,sizeof(out),"%02X",m->identity[i]); emit(m,out); }
+                    emit(m,"\r\n");
+                } else { snprintf(out,sizeof(out),"\r\n%" PRIu64 "\r\n",m->number); emit(m,out); }
                 p+=strlen(p);
             } else if(strcmp(p,"STATS?")==0) {
                 snprintf(out,sizeof(out),"\r\nTX=%" PRIu32 " RX=%" PRIu32
@@ -95,15 +138,54 @@ static void command(struct zm_modem *m) {
                     m->frames_tx,m->frames_rx,m->retries,m->overruns,
                     m->bytes_rx,m->bytes_acked,m->last_fault,m->radio_errors,(int)m->last_rssi,m->radio_status);
                 emit(m,out); p+=strlen(p);
+            } else if(strcmp(p,"LINK?")==0 && m->advanced) {
+                snprintf(out,sizeof(out),"\r\nRATE=%u CHANNEL=%u TRAINING=%u RECOVERING=%u RETRAINS=%" PRIu32
+                         " SWITCHES=%" PRIu32 " RTT=%" PRIu32 " COMP=%u\r\n",
+                         rates[m->profile],m->channel,m->training,m->recovering,m->retrains,m->channel_changes,m->rtt_ms,m->compression);
+                emit(m,out); p+=strlen(p);
+            } else if(strncmp(p,"CHANNEL=",8)==0 && m->advanced && m->link.channel) {
+                p+=8;
+                if(!decimal(&p,&n) || *p) { result(m,4); return; }
+                unsigned index=5;
+                for(unsigned i=0;i<5;i++) if(channels[i]==n) index=i;
+                if(index==5 || !m->link.channel(m->link.ctx,(unsigned)n)) { result(m,4); return; }
+                m->channel_index=index; m->channel=(unsigned)n; m->channel_at=m->now; m->channel_changes++;
+                if(m->state==ZM_CONNECTED) { m->recovering=true; m->last_ping=0; }
+            } else if(strcmp(p,"SEC?")==0 && m->secure_identity) {
+                snprintf(out,sizeof(out),"\r\nNOISE_XX_25519_CHACHAPOLY_BLAKE2S AUTH=%" PRIu32
+                    " REJECT=%" PRIu32 " SAVED=%" PRIu32 " STAGE=%u\r\n",m->authenticated_frames,m->rejected_frames,m->compression_saved,m->secure_stage);
+                emit(m,out); p+=strlen(p);
+            } else if(strcmp(p,"WIRE?")==0 && m->secure_identity) {
+                snprintf(out,sizeof(out),"\r\nRX=%" PRIu32 " INVALID=%" PRIu32 " TYPE=%u LEN=%u\r\n",
+                    m->wire_rx,m->invalid_wire,m->wire_type,m->wire_length);
+                emit(m,out); p+=strlen(p);
+            } else if(strcmp(p,"MS?")==0 && m->advanced) {
+                snprintf(out,sizeof(out),"\r\n%u,%u,%u\r\n",m->adaptive,rates[m->min_profile],rates[m->max_profile]);
+                emit(m,out); p+=strlen(p);
+            } else if(strncmp(p,"MS=",3)==0 && m->advanced && m->state==ZM_IDLE) {
+                uint64_t low,high; p+=3;
+                if(!decimal(&p,&n) || n>1 || *p++!=',' || !decimal(&p,&low) || *p++!=',' || !decimal(&p,&high) || *p) { result(m,4); return; }
+                unsigned lo=5,hi=5;
+                for(unsigned i=0;i<5;i++) { if(rates[i]==low) lo=i; if(rates[i]==high) hi=i; }
+                if(lo>hi || hi>=5) { result(m,4); return; }
+                m->adaptive=(bool)n; m->min_profile=lo; m->max_profile=hi;
             } else { result(m,4); return; }
+        } else if(c=='%' && *p++=='C' && m->advanced && (*p=='0' || *p=='1')) {
+            m->compression=*p++=='1';
         } else if(c=='I') {
             if(*p=='0') p++;
-            emit(m,"\r\nZigmodem 0.1 experimental\r\n");
+            emit(m,"\r\nZigmodem 0.2 experimental\r\n");
         } else if(c=='E' || c=='V' || c=='Q') {
             if(*p!='0' && *p!='1') { result(m,4); return; }
             bool b=*p++=='1';
             if(c=='E') m->echo=b; else if(c=='V') m->verbose=b; else m->quiet=b;
         } else if(c=='Z' || c=='&') {
+            if(c=='&' && *p=='K' && m->advanced) {
+                p++;
+                if(*p=='?') { p++; snprintf(out,sizeof(out),"\r\n%u\r\n",m->software_flow?4:0); emit(m,out); continue; }
+                if(*p!='0' && *p!='4') { result(m,4); return; }
+                m->software_flow=*p++=='4'; continue;
+            }
             if(c=='&' && *p++!='F') { result(m,4); return; }
             if(*p=='0') p++;
             close_call(m,false); defaults(m);
@@ -111,18 +193,24 @@ static void command(struct zm_modem *m) {
             if(*p=='0') p++;
             close_call(m,false);
         } else if(c=='O') {
-            if(*p=='0') p++;
+            bool retrain=*p=='1'; if(*p=='0' || *p=='1') p++;
             if(*p || m->state!=ZM_CONNECTED) { result(m,4); return; }
+            if(retrain && m->advanced) { m->online=false; m->connect_pending=true; train(m); return; }
+            if(m->advanced && m->training) { m->connect_pending=true; return; }
             m->online=true; m->last_input=m->now; result(m,1); return;
         } else if(c=='A') {
             if(*p || m->state!=ZM_RINGING) { result(m,4); return; }
             answer(m); return;
         } else if(c=='D') {
             if(*p=='T' || *p=='P') p++;
-            if(!decimal(&p,&n) || *p || !n || n==m->number || m->state!=ZM_IDLE) {
+            bool valid;
+            if(m->secure_identity) { valid=hex_identity(p,m->peer_identity); n=get(m->peer_identity,8); p+=strlen(p); }
+            else valid=decimal(&p,&n);
+            if(!valid || *p || !n || n==m->number || m->state!=ZM_IDLE) {
                 result(m,4); return;
             }
             clear_stream(m); m->peer=n;
+            m->caller=true; m->last_rx=m->now;
             /* Boot nonce must come from platform entropy. Never reuse a session. */
             if(++m->nonce==0) ++m->nonce;
             m->session=m->nonce; m->state=ZM_DIALING;
@@ -184,21 +272,31 @@ void zm_receive(struct zm_modem *m, const uint8_t *f, size_t n) {
        get(f+12,8)!=m->number) return;
     unsigned type=f[3]; uint64_t src=get(f+4,8), session=get(f+20,8);
     uint32_t seq=(uint32_t)get(f+28,4);
-    if(!src || src==m->number || !session || type<ZM_CALL || type>ZM_CLOSED ||
-       (type!=ZM_DATA && n!=ZM_HEADER) || (type==ZM_DATA && n==ZM_HEADER)) return;
+    bool caps=m->advanced && (type==ZM_CALL || type==ZM_ACCEPT);
+    bool probe=m->advanced && type==ZM_PROBE;
+    if(!src || src==m->number || !session || type<ZM_CALL || type>ZM_PROBE_ACK ||
+       (!caps && !probe && type!=ZM_DATA && n!=ZM_HEADER) || (type==ZM_DATA && n==ZM_HEADER)) return;
+    if(caps && (n!=ZM_HEADER+3 || f[ZM_HEADER]!=2 || f[ZM_HEADER+1]>4 ||
+       f[ZM_HEADER+2]>f[ZM_HEADER+1] || f[ZM_HEADER+1]<m->min_profile || f[ZM_HEADER+2]>m->max_profile)) return;
     m->frames_rx++;
     if(type==ZM_CALL) {
         if(m->state==ZM_IDLE) {
+            m->caller=false; m->last_rx=m->now;
+            if(caps) { m->peer_max=f[ZM_HEADER+1]; m->peer_min=f[ZM_HEADER+2]; }
             clear_stream(m); m->peer=src; m->session=session; m->state=ZM_RINGING;
             m->started=m->last_control=m->now; m->rings=1; result(m,2);
             if(m->autoanswer==1) answer(m);
         } else if(m->peer==src && m->session==session &&
                   (m->state==ZM_ANSWERING || m->state==ZM_CONNECTED)) send(m,ZM_ACCEPT);
-        else if(!(m->peer==src && m->session==session && m->state==ZM_RINGING))
+        else if(m->peer==src && m->session==session && m->state==ZM_RINGING && m->advanced) {
+            m->last_rx=m->now; send(m,ZM_WAIT);
+        } else if(!(m->peer==src && m->session==session && m->state==ZM_RINGING))
             send_to(m,ZM_BUSY,src,session,0,NULL,0);
         return;
     }
     if(src!=m->peer || session!=m->session) return;
+    m->last_rx=m->now;
+    if(type==ZM_WAIT && m->advanced) return;
     if(type==ZM_CLOSE) {
         send(m,ZM_CLOSED);
         if(m->state!=ZM_IDLE && m->state!=ZM_CLOSING) { idle(m); result(m,3); }
@@ -208,6 +306,7 @@ void zm_receive(struct zm_modem *m, const uint8_t *f, size_t n) {
     if(type==ZM_CLOSED && m->state==ZM_CLOSING) { idle(m); return; }
     if(type==ZM_BUSY && m->state==ZM_DIALING) { idle(m); result(m,7); return; }
     if(type==ZM_ACCEPT && (m->state==ZM_DIALING || m->state==ZM_CONNECTED)) {
+        if(caps) { m->peer_max=f[ZM_HEADER+1]; m->peer_min=f[ZM_HEADER+2]; }
         send(m,ZM_CONFIRM);
         if(m->state==ZM_DIALING) connected(m);
         return;
@@ -216,6 +315,14 @@ void zm_receive(struct zm_modem *m, const uint8_t *f, size_t n) {
         connected(m);
     if(m->state!=ZM_CONNECTED) return;
     m->last_rx=m->now;
+    if(m->recovering) { m->recovering=false; train(m); }
+    if(type==ZM_PROBE && m->advanced) { send_to(m,ZM_PROBE_ACK,m->peer,m->session,seq,NULL,0); return; }
+    if(type==ZM_PROBE_ACK && m->training && seq>m->probe_base && seq-m->probe_base<=m->probes) {
+        uint32_t bit=1u<<(seq-m->probe_base-1);
+        if(!(m->probe_mask&bit)) { m->probe_mask|=bit; m->probe_acks++; }
+        if(seq==m->probe_seq) m->rtt_ms=(uint32_t)(m->now-m->probe_at);
+        return;
+    }
     if(type==ZM_PING) send(m,ZM_PONG);
     if(type==ZM_DATA) {
         if(seq==m->rx_seq) {
@@ -226,6 +333,14 @@ void zm_receive(struct zm_modem *m, const uint8_t *f, size_t n) {
         } else if(seq!=m->rx_seq-1 || m->rx_seq==0) return;
         send_to(m,ZM_ACK,m->peer,m->session,seq,NULL,0);
     } else if(type==ZM_ACK && m->inflight && seq==m->tx_seq) {
+        m->rtt_ms=(uint32_t)(m->now-m->last_tx); m->successes++;
+        if(m->advanced && m->adaptive && m->successes>=32) {
+            unsigned max=m->peer_max<m->max_profile?m->peer_max:m->max_profile;
+            unsigned min=m->peer_min>m->min_profile?m->peer_min:m->min_profile;
+            if(m->failures>8 && m->profile>min) m->profile--;
+            else if(m->failures==0 && m->profile<max) m->profile++;
+            m->successes=m->failures=0;
+        }
         m->bytes_acked+=(uint32_t)m->pending_len;
         m->inflight=false; m->tx_seq++;
         /* Avoid wrap: fail before a sequence can be reused in one session. */
@@ -239,6 +354,19 @@ static uint32_t retry_delay(struct zm_modem *m) {
 }
 void zm_tick(struct zm_modem *m, uint64_t now) {
     m->now=now;
+    if(m->advanced && m->link.channel) {
+        bool search=m->state==ZM_IDLE || (now-m->last_rx>=2000 &&
+            (m->state==ZM_DIALING || m->state==ZM_CONNECTED || m->state==ZM_RINGING));
+        unsigned dwell=m->state==ZM_IDLE?(m->channel==25?4000:800):!m->caller?1700:350;
+        if(search && now-m->channel_at>=dwell) {
+            unsigned index=(m->channel_index+1)%5;
+            if(m->link.channel(m->link.ctx,channels[index])) {
+                m->channel_index=index; m->channel=channels[index]; m->channel_changes++;
+                if(m->state==ZM_CONNECTED) { m->recovering=true; m->last_ping=0; }
+            }
+            m->channel_at=now;
+        }
+    }
     if(m->serial_failed) { m->serial_failed=false; m->last_fault=3; close_call(m,false); }
     switch(m->state) {
     case ZM_DIALING:
@@ -259,23 +387,50 @@ void zm_tick(struct zm_modem *m, uint64_t now) {
         else if(now-m->last_control>=300) { send(m,ZM_CLOSE); m->last_control=now; }
         break;
     case ZM_CONNECTED:
-        if(now-m->last_rx>=10000) { m->last_fault=2; close_call(m,true); break; }
+        if(now-m->last_rx>=(m->advanced?30000u:10000u)) { m->last_fault=2; close_call(m,true); break; }
         if(now-m->last_ping>=1000+m->number%251) { send(m,ZM_PING); m->last_ping=now; }
         if(m->escape_count && now-m->escape_at>=m->guard_ms) {
             if(m->escape_count==3) { m->escape_count=0; m->online=false; result(m,0); }
             else (void)flush_escape(m);
         }
+        if(m->recovering) break;
+        if(m->training) {
+            unsigned interval=(ZM_PAYLOAD*8000+rates[m->profile]-1)/rates[m->profile];
+            interval+=(unsigned)((m->number ^ ((uint64_t)m->probe_seq*2654435761u))%23);
+            if(now-m->train_at>=60000) { close_call(m,true); break; }
+            if(m->probes<8 && now-m->probe_at>=interval) {
+                uint8_t pattern[ZM_PAYLOAD]; for(unsigned i=0;i<sizeof(pattern);i++) pattern[i]=(uint8_t)(i*73+m->probes);
+                m->probes++; m->probe_seq++; m->probe_at=now;
+                send_to(m,ZM_PROBE,m->peer,m->session,m->probe_seq,pattern,sizeof(pattern));
+            } else if(m->probes==8 && now-m->probe_at>=interval+250) {
+                unsigned min=m->peer_min>m->min_profile?m->peer_min:m->min_profile;
+                if(m->probe_acks<7 && m->profile>min && m->adaptive) {
+                    m->profile--; m->probes=m->probe_acks=0;
+                    m->probe_base=m->probe_seq; m->probe_mask=0; break;
+                }
+                if(m->probe_acks<2) { close_call(m,true); break; }
+                m->trained_rate=rates[m->profile]; m->training=false;
+                if(m->connect_pending) { m->connect_pending=false; m->online=true; m->last_input=now; result(m,1); }
+            }
+            break;
+        }
+        if(m->advanced && !m->inflight && now<m->next_data) break;
         if(!m->inflight && m->qlen) {
             m->pending_len=m->qlen<ZM_PAYLOAD?m->qlen:ZM_PAYLOAD;
             for(size_t i=0;i<m->pending_len;i++) {
                 m->pending[i]=m->queue[m->qhead]; m->qhead=(m->qhead+1)%ZM_QUEUE;
             }
             m->qlen-=m->pending_len; m->inflight=true; m->last_tx=now;
+            if(m->advanced) m->next_data=now+(m->pending_len*8000+rates[m->profile]-1)/rates[m->profile];
             m->retry_ms=retry_delay(m);
             send_to(m,ZM_DATA,m->peer,m->session,m->tx_seq,m->pending,m->pending_len);
         } else if(m->inflight && now-m->last_tx>=m->retry_ms) {
             m->last_tx=now;
             m->retries++; m->retry_ms=retry_delay(m);
+            m->failures++;
+            unsigned min=m->peer_min>m->min_profile?m->peer_min:m->min_profile;
+            if(m->advanced && m->adaptive && m->failures%8==0 && m->profile>min) m->profile--;
+            if(m->advanced && m->failures%24==0 && now>=2000) m->last_rx=now-2000;
             send_to(m,ZM_DATA,m->peer,m->session,m->tx_seq,m->pending,m->pending_len);
         }
         break;

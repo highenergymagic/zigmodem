@@ -1,0 +1,19 @@
+Noise-C: https://github.com/rweather/noise-c
+Commit cfe25410979a87391bb9ac8d4d4bef64e9f268c6
+Portable subset for Noise_XX_25519_ChaChaPoly_BLAKE2s.
+Original per-file copyright/license notices are preserved.
+Local adaptation: Curve25519 basepoint multiplication uses the already bundled
+Donna implementation, avoiding the separate Ed25519 implementation/tables.
+Unsupported algorithm factories return NULL. Zephyr entropy fails closed.
+All-zero X25519 shared secrets and null public keys are rejected. The receive
+adapter supports explicit datagram nonces without changing cipher state on an
+unauthenticated packet; core/secure.c enforces the replay window. A test build
+can select the same 32-bit Donna path used on the microcontrollers.
+The 32-bit Donna path replaces signed left shifts of potentially negative
+limbs with bounded multiplication, and uses unsigned bit operations for
+equality masks and byte packing. Both paths pass independent Cacophony vectors
+under AddressSanitizer and UndefinedBehaviorSanitizer with halt-on-error.
+
+Heatshrink: https://github.com/atomicobject/heatshrink
+Commit 7d419e1fa4830d0b919b9b6a91fe2fb786cf3280
+Original LICENSE and source notices preserved; static 256-byte window.
