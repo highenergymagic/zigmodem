@@ -1,0 +1,2 @@
+config BOARD_ZBDONGLE_P
+    select SOC_CC2652P

@@ -1,0 +1,6 @@
+board:
+  name: zbdongle_p
+  full_name: SONOFF ZBDongle-P
+  vendor: others
+  socs:
+    - name: cc2652p

@@ -1,0 +1,29 @@
+/dts-v1/;
+#include <ti/cc2652r.dtsi>
+#include <zephyr/dt-bindings/pinctrl/cc13xx_cc26xx-pinctrl.h>
+/ {
+    model = "SONOFF ZBDongle-P";
+    compatible = "sonoff,zbdongle-p";
+    chosen {
+        zephyr,sram = &sram0;
+        zephyr,flash = &flash0;
+        zephyr,console = &uart0;
+        zephyr,ieee802154 = &ieee802154;
+    };
+};
+&cpu0 { clock-frequency = <48000000>; };
+&pinctrl {
+    modem_tx: modem_tx { pinmux = <13 IOC_PORT_MCU_UART0_TX>; bias-disable; };
+    modem_rx: modem_rx { pinmux = <12 IOC_PORT_MCU_UART0_RX>; bias-disable; input-enable; };
+};
+&uart0 {
+    status = "okay";
+    current-speed = <115200>;
+    pinctrl-0 = <&modem_rx &modem_tx>;
+    pinctrl-names = "default";
+};
+&gpio0 { status = "okay"; };
+&trng { status = "okay"; };
+&radio { status = "okay"; };
+&ieee802154 { status = "okay"; };
+&ieee802154g { status = "disabled"; };

@@ -1,0 +1,38 @@
+/dts-v1/;
+/* Zephyr's A-series part definition is the 1024 KiB variant. Explicitly
+ * constrain both memories to the actual A020F768 part fitted to this board. */
+#include <silabs/xg21/efr32mg21a020f1024im32.dtsi>
+#include <silabs/xg21/clock-hfxo.dtsi>
+#include <zephyr/dt-bindings/pinctrl/silabs/xg21-pinctrl.h>
+/ {
+    model = "SONOFF ZBDongle-E (EFR32MG21A020F768)";
+    compatible = "sonoff,zbdongle-e";
+    chosen {
+        zephyr,sram = &sram0;
+        zephyr,flash = &flash0;
+        zephyr,console = &usart0;
+        zephyr,ieee802154 = &ieee802154;
+    };
+};
+&flash0 { reg = <0 DT_SIZE_K(768)>; ranges = <0 0 DT_SIZE_K(768)>; };
+&sram0 { reg = <0x20000000 DT_SIZE_K(64)>; };
+&hfxo { ctune = <140>; precision = <50>; status = "okay"; };
+&lfrco { status = "okay"; };
+&gpio { status = "okay"; };
+&gpiob { status = "okay"; };
+&pinctrl {
+    modem_usart: modem_usart {
+        tx { pins = <USART0_TX_PB1>; drive-push-pull; output-high; };
+        rx { pins = <USART0_RX_PB0>; input-enable; silabs,input-filter; };
+    };
+};
+&usart0 {
+    status = "okay";
+    current-speed = <115200>;
+    pinctrl-0 = <&modem_usart>;
+    pinctrl-names = "default";
+};
+&rtcc0 { prescaler = <1>; status = "okay"; };
+&se { status = "okay"; };
+&ieee802154 { status = "okay"; hfxo = <&hfxo>; };
+&protimer { status = "okay"; };

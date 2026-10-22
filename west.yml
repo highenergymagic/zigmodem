@@ -1,0 +1,17 @@
+manifest:
+  version: "1.2"
+  projects:
+    - name: zephyr
+      url: https://github.com/zephyrproject-rtos/zephyr
+      revision: 1179a68cd2d142b2dd93b76101eb24ae335a8e24
+      import:
+        name-allowlist:
+          - cmsis
+          - cmsis_6
+          - hal_ti
+          - hal_silabs
+          - picolibc
+          - mbedtls
+          - tf-psa-crypto
+  self:
+    path: zigmodem

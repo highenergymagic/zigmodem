@@ -1,0 +1,6 @@
+board:
+  name: zbdongle_e
+  full_name: SONOFF ZBDongle-E
+  vendor: others
+  socs:
+    - name: efr32mg21a020f1024im32
