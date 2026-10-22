@@ -6,13 +6,21 @@
 #include <stdint.h>
 
 #define ZM_PAYLOAD 64
-#define ZM_HEADER 32
+#define ZM_HEADER 40
 #define ZM_FRAME (ZM_HEADER + ZM_PAYLOAD)
 #define ZM_QUEUE 2048
+#define ZM_WINDOW 8
+#define ZM_RATE_COUNT 10
+struct zm_slot { uint8_t data[ZM_PAYLOAD]; size_t len; uint32_t seq; uint64_t sent; bool used; };
 enum zm_state { ZM_IDLE, ZM_DIALING, ZM_RINGING, ZM_ANSWERING, ZM_CONNECTED, ZM_CLOSING };
 enum zm_type { ZM_CALL=1, ZM_ACCEPT, ZM_CONFIRM, ZM_BUSY, ZM_DATA, ZM_ACK,
                ZM_PING, ZM_PONG, ZM_CLOSE, ZM_CLOSED, ZM_WAIT, ZM_PROBE, ZM_PROBE_ACK };
-struct zm_link_ops { void *ctx; bool (*channel)(void *,unsigned); };
+struct zm_link_ops {
+    void *ctx;
+    bool (*channel)(void *,unsigned);
+    bool (*pin)(void *,const uint8_t[16]);
+    bool (*lookup)(void *,unsigned,uint8_t[16]);
+};
 /* Callbacks are synchronous and must not reenter the modem. Serial must accept
  * the entire buffer or none; radio may drop a frame (the protocol retries).
  * All API calls must be serialized by the platform. now is monotonic ms. */
@@ -37,6 +45,11 @@ struct zm_modem {
     struct zm_link_ops link;
     bool advanced, caller, training, recovering, compression, adaptive, connect_pending;
     bool software_flow;
+    struct zm_slot tx_window[ZM_WINDOW], rx_window[ZM_WINDOW];
+    uint32_t tx_base;
+    bool ack_pending;
+    unsigned ack_count;
+    uint64_t ack_at;
     unsigned channel, channel_index, profile, min_profile, max_profile, peer_max, peer_min;
     unsigned probes, probe_acks, last_probe_ack, successes, failures;
     uint64_t channel_at, probe_at, next_data, train_at, sample_at;
@@ -56,6 +69,7 @@ struct zm_modem {
 };
 void zm_init(struct zm_modem *, uint64_t number, uint64_t boot_nonce, struct zm_io);
 void zm_set_identity(struct zm_modem *,const uint8_t identity[16]);
+uint64_t zm_phone(const uint8_t identity[16]);
 void zm_enable_link(struct zm_modem *,struct zm_link_ops);
 void zm_tick(struct zm_modem *, uint64_t now);
 void zm_receive(struct zm_modem *, const uint8_t *, size_t);

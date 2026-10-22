@@ -4,6 +4,7 @@
 #include <silabs/xg21/efr32mg21a020f1024im32.dtsi>
 #include <silabs/xg21/clock-hfxo.dtsi>
 #include <zephyr/dt-bindings/pinctrl/silabs/xg21-pinctrl.h>
+#include <zephyr/dt-bindings/dma/silabs/xg21-dma.h>
 / {
     model = "SONOFF ZBDongle-E (EFR32MG21A020F768)";
     compatible = "sonoff,zbdongle-e";
@@ -28,11 +29,14 @@
 };
 &usart0 {
     status = "okay";
-    current-speed = <9600>;
+    current-speed = <115200>;
+    dmas = <&dma0 DMA_REQSEL_USART0RXDATAV>, <&dma0 DMA_REQSEL_USART0TXBL>;
+    dma-names = "rx", "tx";
     pinctrl-0 = <&modem_usart>;
     pinctrl-names = "default";
 };
 &rtcc0 { prescaler = <1>; status = "okay"; };
+&dma0 { status = "okay"; };
 &se { status = "okay"; };
 &ieee802154 { status = "okay"; hfxo = <&hfxo>; };
 &protimer { status = "okay"; };

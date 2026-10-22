@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import re
 import time
+import threading
 import serial
 
 p = argparse.ArgumentParser(description=__doc__)
@@ -18,8 +19,14 @@ p.add_argument("--bytes", type=int, default=4096)
 p.add_argument("--pattern", choices=["binary", "repeat"], default="binary")
 p.add_argument("--retrain", action="store_true")
 p.add_argument("--switch", action="store_true", help="force one peer off-channel and verify automatic recovery")
+p.add_argument("--baud", type=int, default=115200)
+p.add_argument("--flow", action="store_true", help="XON/XOFF; test data excludes reserved control bytes")
+p.add_argument("--direction", choices=["duplex", "dial", "answer"], default="duplex")
+p.add_argument("--fixed-rate", type=int)
+p.add_argument("--unpaced", action="store_true", help="requires --flow")
 args = p.parse_args()
-s = serial.Serial(port=None, baudrate=9600, timeout=0.05, exclusive=True)
+if args.unpaced and not args.flow: p.error("--unpaced requires --flow")
+s = serial.Serial(port=None, baudrate=args.baud, timeout=0.05, write_timeout=10, exclusive=True)
 s.dtr = s.rts = False
 s.port = args.port
 s.open()
@@ -31,6 +38,8 @@ def wait_for(token, timeout=90):
     while time.monotonic() < deadline:
         # Never consume stream bytes following CONNECT in the same USB read.
         data.extend(s.read(1))
+        if token == b"OK" and b"\r\nERROR\r\n" in data:
+            raise RuntimeError(f"AT command rejected: {data!r}")
         if token == b"CONNECT" and any(x in data for x in (b"\r\nNO ANSWER\r\n", b"\r\nBUSY\r\n", b"\r\nNO CARRIER\r\n")):
             raise RuntimeError(f"Call failed: {data!r}")
         connected = token == b"CONNECT" and re.search(rb"\r\nCONNECT(?: \d+)?\r\n$", data)
@@ -49,6 +58,10 @@ try:
     s.reset_input_buffer()
     command("ATE0")
     command("AT+PHONUM?")
+    if args.fixed_rate: command(f"AT+MS=0,{args.fixed_rate},{args.fixed_rate}")
+    if args.flow:
+        command("AT&K4")
+        s.xonxoff = True
     if args.role == "answer":
         command("ATS0=0")
         print("READY", flush=True)
@@ -58,7 +71,7 @@ try:
         if not args.number:
             raise ValueError("dial requires --number")
         connected = command("ATDT" + args.number, b"CONNECT")
-    # CONNECT reports DCE pacing; the host UART remains at 9600 baud.
+    # CONNECT reports the payload pacing policy, independently of UART speed.
     match = re.search(rb"CONNECT (\d+)", connected)
     rate = int(match.group(1)) if match else 300
     own = 17 if args.role == "dial" else 29
@@ -68,21 +81,36 @@ try:
     if args.pattern == "repeat":
         outgoing = bytes([own]) * args.bytes
         expected = bytes([other]) * args.bytes
+    if args.flow:
+        # Deterministic incompressible input, excluding the UART's two reserved bytes.
+        outgoing = hashlib.shake_256(bytes([own])).digest(args.bytes).replace(b"\x11",b"\x12").replace(b"\x13",b"\x14")
+        expected = hashlib.shake_256(bytes([other])).digest(args.bytes).replace(b"\x11",b"\x12").replace(b"\x13",b"\x14")
+    if args.direction != "duplex":
+        if args.direction == args.role: expected = b""
+        else: outgoing = b""
     incoming = bytearray()
     sent = 0
+    failures = []
     started = time.monotonic()
-    next_send = started + 0.5
-    deadline = started + max(90, args.bytes * 8 / 300 * 2)
-    while len(incoming) < len(expected) or sent < len(outgoing):
-        now = time.monotonic()
-        if now > deadline:
-            raise RuntimeError(f"Transfer timeout: sent {sent}, received {len(incoming)}; "
-                               f"first={incoming[:180]!r}; last={incoming[-100:]!r}")
-        if sent < len(outgoing) and now >= next_send:
-            n = s.write(outgoing[sent:sent+32])
-            sent += n
-            next_send = now + max(0.02, n * 8 / rate * 1.25)
-        incoming.extend(s.read(min(256, max(1, len(expected)-len(incoming)))))
+    def writer():
+        global sent
+        try:
+            time.sleep(0.5)
+            while sent < len(outgoing):
+                n = s.write(outgoing[sent:sent+64]); sent += n
+                if not args.unpaced: time.sleep(n * 8 / rate * 1.1)
+        except Exception as exc:
+            failures.append(exc)
+    sending = threading.Thread(target=writer, daemon=True)
+    sending.start()
+    deadline = started + max(120, args.bytes * 8 / 1200 * 2)
+    while len(incoming) < len(expected) or sending.is_alive():
+        if failures: raise failures[0]
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"Transfer timeout: sent {sent}, received {len(incoming)}")
+        if len(incoming) < len(expected): incoming.extend(s.read(min(512,len(expected)-len(incoming))))
+        else: time.sleep(0.005)
+    if failures: raise failures[0]
     if bytes(incoming) != expected:
         raise RuntimeError("Binary content mismatch")
     # Each peer proves it received the other's entire stream before hangup.
@@ -94,8 +122,9 @@ try:
         barrier.extend(s.read(8-len(barrier)))
     if barrier != b"ZMDONE1!":
         raise RuntimeError(f"Completion handshake failed: {barrier!r}")
-    print(f"PASS {args.bytes} bytes each direction; received SHA256 "
-          f"{hashlib.sha256(incoming).hexdigest()}; {time.monotonic()-started:.2f}s", flush=True)
+    print(f"PASS sent={len(outgoing)} received={len(expected)} bytes; received SHA256 "
+          f"{hashlib.sha256(incoming).hexdigest()}; {time.monotonic()-started:.2f}s; "
+          f"payload={max(len(outgoing),len(expected))*8/(time.monotonic()-started)/1000:.2f} kbit/s", flush=True)
     if args.retrain:
         time.sleep(1.2)
         s.write(b"+++")
@@ -157,4 +186,7 @@ except Exception:
     print("diagnostics:", repr(s.read(4096)), flush=True)
     raise
 finally:
+    s.xonxoff = False
+    s.write(b"\x11AT&K0\r")
+    time.sleep(0.1)
     s.close()

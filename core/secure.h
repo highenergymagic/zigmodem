@@ -10,6 +10,7 @@ struct zs_io {
     void (*wire)(void *,const uint8_t *,size_t);
     void (*plain)(void *,const uint8_t *,size_t);
     bool (*accept)(void *);
+    bool (*trust)(void *,const uint8_t[16]);
 };
 struct zs_link {
     struct zs_io io;

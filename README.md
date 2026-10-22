@@ -1,16 +1,16 @@
 # Zigmodem
 
 Hayes-style encrypted serial radio modems for SONOFF ZBDongle-P (CC2652P) and
-ZBDongle-E (EFR32MG21). Dial another dongle's public-key fingerprint, answer
+ZBDongle-E (EFR32MG21). Dial another dongle's numeric phone number, answer
 its call, and exchange a reliable binary stream over 2.4 GHz IEEE 802.15.4.
 
 This is experimental firmware, not a telephone-network modem. Both peers must
-run compatible Zigmodem firmware and be within radio range. Version 0.2 does
-not connect to plaintext 0.1 firmware.
+run compatible Zigmodem firmware and be within radio range. Version 0.3 is
+incompatible with 0.1/0.2 firmware; upgrade both endpoints.
 
 ## Use
 
-Open the USB serial port at **9600 baud, 8N1**, with hardware and software
+Open the USB serial port at **115200 baud, 8N1**, with hardware and software
 flow control disabled. Allow about half a second after opening: some USB
 bridge revisions reset the radio when the port opens. Keep the port open for
 the duration of a call.
@@ -19,10 +19,10 @@ the duration of a call.
 AT
 OK
 AT+PHONUM?
-F4A59EC16C3C605CFC17EED30E56D896
+8056127476
 OK
-ATDT2E9944F60F8F18FE7F59E33F1FFD9E56
-CONNECT 9600
+ATDT3793723694
+CONNECT 33600
 ```
 
 On the receiving modem:
@@ -30,26 +30,30 @@ On the receiving modem:
 ```
 RING
 ATA
-CONNECT 9600
+CONNECT 33600
 ```
 
 After `CONNECT`, bytes pass to the other modem. To return to command mode,
 pause transmission for one second, send `+++`, and pause for another second.
 `ATH` hangs up; `ATO` returns to the connection. `ATS0=1` answers the first
 ring automatically. Set `ATE0` to disable command echo.
-`CONNECT n` reports the trained target payload rate; the UART remains at 9600.
+`CONNECT n` reports the trained target payload rate; the UART remains at 115200.
 
 | Command | Meaning |
 | --- | --- |
 | `AT` | Check the modem |
 | `ATI` | Firmware identification |
-| `AT+PHONUM?` | 128-bit public-key fingerprint, 32 hexadecimal digits |
+| `AT+PHONUM?` | Ten-digit decimal phone number |
+| `AT+IDENT?` | Full 128-bit public-key fingerprint, 32 hex digits |
+| `AT+PIN=<fingerprint>` | Store a verified peer identity; refuse conflicting existing pins |
+| `AT+BOOK?` | List persistent speed-dial slots, numbers and fingerprints |
+| `ATDT1` ... `ATDT16` | Dial a stored full identity by its local numeric slot |
 | `AT+STATS?` | Radio frame/retry counts, byte counts, overruns, last failure and RSSI |
 | `AT+LINK?` | Current target payload rate, channel, training/recovery counters and RTT |
 | `AT+SEC?` | Cipher suite, authenticated/rejected record counts, compression savings |
 | `AT+WIRE?` | Wire-frame receive diagnostics |
 | `AT+CHANNEL=n` | Retune to a channel in the scan list; active calls recover automatically |
-| `AT+MS?`, `AT+MS=auto,min,max` | Link rate policy; auto is 0/1; rates: 300,1200,2400,4800,9600 |
+| `AT+MS?`, `AT+MS=auto,min,max` | Link rate policy; auto is 0/1; rates: 300,1200,2400,4800,9600,14400,19200,28800,33600,56000 |
 | `AT%C0/1` | Disable/enable outgoing block compression (default enabled) |
 | `AT&K0/4`, `AT&K?` | Flow control off / XON-XOFF, or query; default off |
 | `ATDT<number>`, `ATDP<number>` | Dial a peer |
@@ -80,12 +84,24 @@ On Silicon Labs this diagnostic field is zero.
 ## Encryption, training, compression, and recovery
 
 First boot generates a random X25519 identity key and stores it in a reserved
-flash partition. The phone number is the first 128 bits of BLAKE2s(public key).
-The caller verifies the full fingerprint during a Noise XX handshake; every
-subsequent modem frame is authenticated and encrypted with ChaCha20-Poly1305.
-There is no plaintext fallback and no shared password to configure. Fresh
-ephemeral keys provide forward secrecy between calls. Anyone who knows the
-number may call; it is an identity, not an access-control list.
+flash partition. The full identity is the first 128 bits of BLAKE2s(public key).
+A ten-digit number derived from it provides ordinary numeric dialing. The
+Noise XX handshake encrypts and authenticates calls with ChaCha20-Poly1305;
+fresh ephemeral keys provide forward secrecy. There is no plaintext fallback.
+
+**Numeric dialing uses trust-on-first-use.** The modem remembers the peer's full
+identity and rejects later key changes. A short number alone cannot authenticate
+an unknown peer against a first-contact impersonator. Preload a verified identity
+with `AT+PIN=<fingerprint>` or dial the verified full fingerprint for that first
+call. Both reject a conflicting existing pin. No shared password is required.
+Anyone may call; the pin book is not a caller access-control list.
+
+Pins persist across resets and application upgrades. `AT+BOOK?` lists up to
+16 entries. Each also has a short local alias: `ATDT1` calls entry 1 using its
+full pinned identity. Empty slots return ERROR; a full book refuses new peers.
+For the bench pair, carbon is **3793723694**, millie is **8056127476**, and
+each has the other securely preloaded in slot **1**. Thus `ATDT1` works from
+either host, including applications limited to very short digit-only numbers.
 
 Initial training probes the agreed rate range and falls back when probes fail.
 The target payload rates are pacing policies, not changes to the fixed
@@ -100,7 +116,7 @@ compressed/encrypted data usually gains nothing. `AT%C0` disables compression;
 ciphertext length still reveals traffic size, and compression can reveal
 information when secrets and attacker-controlled bytes share a block.
 
-Radio CRC, authenticated record tags, and stop-and-wait acknowledgments reject
+Radio CRC, authenticated tags, and an eight-packet selective-repeat window reject
 corruption and recover dropped data through retransmission. This is ARQ error
 recovery, not an added forward-error-correction code. Duplicates are not delivered
 twice. See [protocol details](docs/protocol.md).
@@ -114,9 +130,9 @@ twice. See [protocol details](docs/protocol.md).
 - No mesh routing, discovery directory, audio, or PSTN access.
 - No DCD/RI/DTR modem semantics or RTS/CTS flow control. Stock bridge wiring
   limits these features: DTR/RTS operate reset/bootloader circuitry. Pace
-  sustained serial input to the negotiated rate; 9600 is the UART
-  speed, not a guaranteed radio throughput. UART overrun terminates the call
-  instead of silently dropping data. The hardware test uses paced writes.
+  sustained serial input to measured link capacity, or use software flow control.
+  The 115200 UART speed and CONNECT target do not guarantee radio throughput. UART overrun terminates the call
+  instead of silently dropping data. The hardware test supports pacing or XON/XOFF.
   Optional `AT&K4` reserves XON/XOFF bytes (`0x11`/`0x13`) for local flow control;
   enable matching host flow control and use a transport that escapes these
   bytes (such as appropriately configured PPP). It is not transparent for an
@@ -156,10 +172,24 @@ Each prints a PTY path. Open each path with a terminal program, then dial
 `ATDT456` from the first. Simulator UDP is bound to loopback; it is a test
 transport, not the firmware's radio transport.
 This legacy simulator runs the plaintext modem core only. The `secure` and
-`crypto` tests exercise the v2 encrypted transport, training, channel recovery,
+`crypto` tests exercise the v3 encrypted transport, training, channel recovery,
 compression, replay rejection and independent Noise interoperability vectors.
 
 ## Firmware
+
+Version **0.3** uses 115200-baud serial ports, DMA on E, compact encrypted
+packets and an eight-packet selective-repeat window. Bench measurements on
+one P/E pair with 64 KiB of incompressible input were approximately **37–39
+kbit/s one-way**, or **21 kbit/s per direction simultaneously** (about 43
+kbit/s combined). These measurements used XON/XOFF and a fixed 56000 pacing
+profile; they do **not** establish 56 kbit/s payload throughput. Automatic
+training may select lower profiles. Every received byte was checked.
+
+The 0.3 checks also cover numeric/one-digit dialing, persistent identity pins,
+arbitrary binary transfers with software flow control off, manual retraining,
+and channel recovery. The test excludes XON/XOFF bytes only when software
+flow control is enabled. The host suite checks changed-pin rejection and a
+hangup acknowledgment arriving midway through the next AT command.
 
 The **0.2 encrypted** bench qualification used one P/E pair on separate hosts:
 
@@ -187,8 +217,8 @@ pacing). This is a bench test of one pair, not a range or endurance rating.
 Channel 20 suffered repeated clear-channel-assessment failures in that setup;
 channel 25 worked. Version 0.2 corrects the TI driver's CCA configuration;
 the earlier channel observation does not characterize the new firmware.
-The application uses 9600 baud because 115200 caused an
-EFR32 UART overrun during sustained duplex traffic.
+Version 0.1 used 9600 baud because 115200 caused an EFR32 UART overrun.
+Version 0.3 adds DMA RX/TX on E and uses 115200 on both boards.
 
 See [building and recovery](docs/firmware.md) and the
 [wire protocol](docs/protocol.md). Both targets use the same C modem core and
@@ -208,3 +238,11 @@ binary content in both directions, guarded escape, querying while connected,
 and hangup. SSH may orchestrate them; it does not carry the test payload.
 Add `--switch` to both commands to exercise channel recovery, or
 `--pattern repeat --retrain` to check compression and manual retraining.
+
+For sustained incompressible throughput testing, use
+`--bytes 65536 --flow --unpaced --fixed-rate 56000` on both ends.
+Add `--direction dial` to test only
+caller-to-answerer traffic; omit it for simultaneous duplex. The flow-control
+test excludes reserved XON/XOFF bytes from deterministic random data and checks
+every received byte. Its reported payload rate includes transfer/barrier time,
+not dialing or training. Arbitrary binary qualification uses flow control off.

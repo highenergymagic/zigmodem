@@ -6,7 +6,7 @@ import serial
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument("port")
 a = p.parse_args()
-s = serial.Serial(port=None, baudrate=9600, timeout=0.2, exclusive=True)
+s = serial.Serial(port=None, baudrate=115200, timeout=0.2, exclusive=True)
 s.dtr = s.rts = False
 s.port = a.port
 s.open()

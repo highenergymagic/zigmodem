@@ -4,7 +4,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
-static const unsigned rates[]={300,1200,2400,4800,9600};
+static const unsigned rates[]={300,1200,2400,4800,9600,14400,19200,28800,33600,56000};
 static const unsigned channels[]={25,15,20,26,11};
 static void train(struct zm_modem *m) {
     m->training=true; m->probes=m->probe_acks=m->last_probe_ack=0; m->train_at=m->now; m->probe_at=0;
@@ -13,7 +13,7 @@ static void train(struct zm_modem *m) {
     m->probe_base=m->probe_seq; m->probe_mask=0;
 }
 void zm_enable_link(struct zm_modem *m,struct zm_link_ops link) {
-    m->advanced=true; m->link=link; m->channel=25; m->max_profile=m->peer_max=4;
+    m->advanced=true; m->link=link; m->channel=25; m->max_profile=m->peer_max=ZM_RATE_COUNT-1;
     m->profile=2; m->adaptive=true; m->compression=true;
 }
 
@@ -40,6 +40,14 @@ static void send_to(struct zm_modem *m, unsigned type, uint64_t dst, uint64_t se
                     uint32_t seq, const uint8_t *data, size_t n) {
     uint8_t f[ZM_FRAME] = {'Z','M',1,0};
     f[3]=(uint8_t)type;
+    if(m->advanced) {
+        uint32_t mask=0;
+        for(unsigned i=0;i<ZM_WINDOW;i++) if(m->rx_window[i].used) {
+            uint32_t d=m->rx_window[i].seq-m->rx_seq;
+            if(d<32) mask|=1u<<d;
+        }
+        put(f+32,m->rx_seq,4); put(f+36,mask,4); m->ack_pending=false; m->ack_count=0;
+    }
     put(f+4,m->number,8); put(f+12,dst,8); put(f+20,session,8); put(f+28,seq,4);
     if(n) memcpy(f+ZM_HEADER,data,n);
     m->frames_tx++;
@@ -47,13 +55,14 @@ static void send_to(struct zm_modem *m, unsigned type, uint64_t dst, uint64_t se
 }
 static void send(struct zm_modem *m, unsigned type) {
     if(m->advanced && (type==ZM_CALL || type==ZM_ACCEPT)) {
-        uint8_t caps[3]={2,(uint8_t)m->max_profile,(uint8_t)m->min_profile};
+        uint8_t caps[3]={3,(uint8_t)m->max_profile,(uint8_t)m->min_profile};
         send_to(m,type,m->peer,m->session,0,caps,sizeof(caps));
     } else send_to(m,type,m->peer,m->session,0,NULL,0);
 }
 static void clear_stream(struct zm_modem *m) {
     m->qhead=m->qlen=m->pending_len=0; m->inflight=false;
-    m->tx_seq=m->rx_seq=0; m->escape_count=0; m->command_len=0; m->overflow=false;
+    m->tx_seq=m->rx_seq=m->tx_base=0; m->ack_pending=false; m->ack_count=0;
+    memset(m->tx_window,0,sizeof(m->tx_window)); memset(m->rx_window,0,sizeof(m->rx_window)); m->escape_count=0;
     m->connect_pending=false; m->recovering=false; m->training=false;
 }
 static void idle(struct zm_modem *m) {
@@ -76,7 +85,7 @@ static void defaults(struct zm_modem *m) {
     m->echo=true; m->verbose=true; m->quiet=false;
     m->autoanswer=0; m->dial_seconds=30; m->guard_ms=1000;
     m->software_flow=false;
-    if(m->advanced) { m->min_profile=0; m->max_profile=4; m->adaptive=true; m->compression=true; }
+    if(m->advanced) { m->min_profile=0; m->max_profile=ZM_RATE_COUNT-1; m->adaptive=true; m->compression=true; }
 }
 void zm_init(struct zm_modem *m, uint64_t number, uint64_t nonce, struct zm_io io) {
     memset(m,0,sizeof(*m)); m->number=number; m->nonce=nonce; m->io=io; defaults(m);
@@ -96,8 +105,11 @@ static bool decimal(const char **p, uint64_t *value) {
 static void answer(struct zm_modem *m) {
     m->state=ZM_ANSWERING; m->last_control=m->now; send(m,ZM_ACCEPT);
 }
+uint64_t zm_phone(const uint8_t identity[16]) {
+    return UINT64_C(1000000000)+get(identity,8)%UINT64_C(9000000000);
+}
 void zm_set_identity(struct zm_modem *m,const uint8_t identity[16]) {
-    memcpy(m->identity,identity,16); m->secure_identity=true; m->number=get(identity,8);
+    memcpy(m->identity,identity,16); m->secure_identity=true; m->number=zm_phone(identity);
 }
 static bool hex_identity(const char *p,uint8_t id[16]) {
     if(strlen(p)!=32) return false;
@@ -124,13 +136,26 @@ static void command(struct zm_modem *m) {
         char c=*p++;
         if(c==' ') continue;
         if(c=='+') {
-            if(strcmp(p,"PHONUM?")==0) {
+            if(strcmp(p,"IDENT?")==0 && m->secure_identity) {
                 if(m->secure_identity) {
                     emit(m,"\r\n");
                     for(unsigned i=0;i<16;i++) { snprintf(out,sizeof(out),"%02X",m->identity[i]); emit(m,out); }
                     emit(m,"\r\n");
                 } else { snprintf(out,sizeof(out),"\r\n%" PRIu64 "\r\n",m->number); emit(m,out); }
                 p+=strlen(p);
+            } else if(strcmp(p,"PHONUM?")==0) {
+                snprintf(out,sizeof(out),"\r\n%" PRIu64 "\r\n",m->number); emit(m,out); p+=strlen(p);
+            } else if(strncmp(p,"PIN=",4)==0 && m->state==ZM_IDLE && m->link.pin) {
+                uint8_t id[16];
+                if(!hex_identity(p+4,id) || !m->link.pin(m->link.ctx,id)) { result(m,4); return; }
+                p+=strlen(p);
+            } else if(strcmp(p,"BOOK?")==0 && m->link.lookup) {
+                uint8_t id[16];
+                for(unsigned i=1;i<=16;i++) if(m->link.lookup(m->link.ctx,i,id)) {
+                    snprintf(out,sizeof(out),"\r\n%u=%" PRIu64 ",",i,zm_phone(id)); emit(m,out);
+                    for(unsigned j=0;j<16;j++) { snprintf(out,sizeof(out),"%02X",id[j]); emit(m,out); }
+                }
+                emit(m,"\r\n"); p+=strlen(p);
             } else if(strcmp(p,"STATS?")==0) {
                 snprintf(out,sizeof(out),"\r\nTX=%" PRIu32 " RX=%" PRIu32
                     " RETRY=%" PRIu32 " OVERRUN=%" PRIu32 " IN=%" PRIu32
@@ -165,16 +190,16 @@ static void command(struct zm_modem *m) {
             } else if(strncmp(p,"MS=",3)==0 && m->advanced && m->state==ZM_IDLE) {
                 uint64_t low,high; p+=3;
                 if(!decimal(&p,&n) || n>1 || *p++!=',' || !decimal(&p,&low) || *p++!=',' || !decimal(&p,&high) || *p) { result(m,4); return; }
-                unsigned lo=5,hi=5;
-                for(unsigned i=0;i<5;i++) { if(rates[i]==low) lo=i; if(rates[i]==high) hi=i; }
-                if(lo>hi || hi>=5) { result(m,4); return; }
+                unsigned lo=ZM_RATE_COUNT,hi=ZM_RATE_COUNT;
+                for(unsigned i=0;i<ZM_RATE_COUNT;i++) { if(rates[i]==low) lo=i; if(rates[i]==high) hi=i; }
+                if(lo>hi || hi>=ZM_RATE_COUNT) { result(m,4); return; }
                 m->adaptive=(bool)n; m->min_profile=lo; m->max_profile=hi;
             } else { result(m,4); return; }
         } else if(c=='%' && *p++=='C' && m->advanced && (*p=='0' || *p=='1')) {
             m->compression=*p++=='1';
         } else if(c=='I') {
             if(*p=='0') p++;
-            emit(m,"\r\nZigmodem 0.2 experimental\r\n");
+            emit(m,"\r\nZigmodem 0.3 experimental\r\n");
         } else if(c=='E' || c=='V' || c=='Q') {
             if(*p!='0' && *p!='1') { result(m,4); return; }
             bool b=*p++=='1';
@@ -204,7 +229,14 @@ static void command(struct zm_modem *m) {
         } else if(c=='D') {
             if(*p=='T' || *p=='P') p++;
             bool valid;
-            if(m->secure_identity) { valid=hex_identity(p,m->peer_identity); n=get(m->peer_identity,8); p+=strlen(p); }
+            if(m->secure_identity && strlen(p)==32) {
+                valid=hex_identity(p,m->peer_identity); n=valid?zm_phone(m->peer_identity):0; p+=strlen(p);
+            } else if(m->secure_identity) {
+                memset(m->peer_identity,0,16); valid=decimal(&p,&n);
+                if(valid && n>=1 && n<=16 && m->link.lookup && m->link.lookup(m->link.ctx,(unsigned)n,m->peer_identity))
+                    n=zm_phone(m->peer_identity);
+                else valid=valid && n>=UINT64_C(1000000000) && n<=UINT64_C(9999999999);
+            }
             else valid=decimal(&p,&n);
             if(!valid || *p || !n || n==m->number || m->state!=ZM_IDLE) {
                 result(m,4); return;
@@ -267,6 +299,33 @@ size_t zm_input(struct zm_modem *m, const uint8_t *data, size_t n) {
     }
     return i;
 }
+static void drain_received(struct zm_modem *m) {
+    while(m->online) {
+        struct zm_slot *slot=&m->rx_window[m->rx_seq%ZM_WINDOW];
+        if(!slot->used || slot->seq!=m->rx_seq || !m->io.serial(m->io.ctx,slot->data,slot->len)) break;
+        m->bytes_rx+=(uint32_t)slot->len; slot->used=false; m->rx_seq++;
+        if(!m->ack_pending) m->ack_at=m->now;
+        m->ack_pending=true;
+    }
+}
+static void acknowledge(struct zm_modem *m,const uint8_t *f) {
+    uint32_t base=(uint32_t)get(f+32,4),mask=(uint32_t)get(f+36,4);
+    if(base>m->tx_seq) return;
+    for(unsigned i=0;i<ZM_WINDOW;i++) {
+        struct zm_slot *slot=&m->tx_window[i]; uint32_t d=slot->seq-base;
+        if(slot->used && (slot->seq<base || (d<32 && (mask&(1u<<d))))) {
+            m->bytes_acked+=(uint32_t)slot->len; m->rtt_ms=(uint32_t)(m->now-slot->sent);
+            slot->used=false; m->successes++;
+        }
+    }
+    while(m->tx_base<m->tx_seq && !m->tx_window[m->tx_base%ZM_WINDOW].used) m->tx_base++;
+    m->inflight=m->tx_base<m->tx_seq;
+    if(m->adaptive && m->successes>=64) {
+        unsigned max=m->peer_max<m->max_profile?m->peer_max:m->max_profile;
+        if(m->failures==0 && m->profile<max) m->profile++;
+        m->successes=m->failures=0;
+    }
+}
 void zm_receive(struct zm_modem *m, const uint8_t *f, size_t n) {
     if(n<ZM_HEADER || n>ZM_FRAME || f[0]!='Z' || f[1]!='M' || f[2]!=1 ||
        get(f+12,8)!=m->number) return;
@@ -276,7 +335,7 @@ void zm_receive(struct zm_modem *m, const uint8_t *f, size_t n) {
     bool probe=m->advanced && type==ZM_PROBE;
     if(!src || src==m->number || !session || type<ZM_CALL || type>ZM_PROBE_ACK ||
        (!caps && !probe && type!=ZM_DATA && n!=ZM_HEADER) || (type==ZM_DATA && n==ZM_HEADER)) return;
-    if(caps && (n!=ZM_HEADER+3 || f[ZM_HEADER]!=2 || f[ZM_HEADER+1]>4 ||
+    if(caps && (n!=ZM_HEADER+3 || f[ZM_HEADER]!=3 || f[ZM_HEADER+1]>=ZM_RATE_COUNT ||
        f[ZM_HEADER+2]>f[ZM_HEADER+1] || f[ZM_HEADER+1]<m->min_profile || f[ZM_HEADER+2]>m->max_profile)) return;
     m->frames_rx++;
     if(type==ZM_CALL) {
@@ -316,6 +375,7 @@ void zm_receive(struct zm_modem *m, const uint8_t *f, size_t n) {
     if(m->state!=ZM_CONNECTED) return;
     m->last_rx=m->now;
     if(m->recovering) { m->recovering=false; train(m); }
+    if(m->advanced) acknowledge(m,f);
     if(type==ZM_PROBE && m->advanced) { send_to(m,ZM_PROBE_ACK,m->peer,m->session,seq,NULL,0); return; }
     if(type==ZM_PROBE_ACK && m->training && seq>m->probe_base && seq-m->probe_base<=m->probes) {
         uint32_t bit=1u<<(seq-m->probe_base-1);
@@ -324,6 +384,15 @@ void zm_receive(struct zm_modem *m, const uint8_t *f, size_t n) {
         return;
     }
     if(type==ZM_PING) send(m,ZM_PONG);
+    if(type==ZM_DATA && m->advanced) {
+        if(seq>=m->rx_seq && seq-m->rx_seq<ZM_WINDOW) {
+            struct zm_slot *slot=&m->rx_window[seq%ZM_WINDOW];
+            if(!slot->used) { slot->used=true; slot->seq=seq; slot->len=n-ZM_HEADER; memcpy(slot->data,f+ZM_HEADER,slot->len); }
+        }
+        drain_received(m);
+        if(!m->ack_pending) m->ack_at=m->now;
+        m->ack_pending=true; m->ack_count++; return;
+    }
     if(type==ZM_DATA) {
         if(seq==m->rx_seq) {
             /* Hold remote data while locally in command mode. */
@@ -387,6 +456,10 @@ void zm_tick(struct zm_modem *m, uint64_t now) {
         else if(now-m->last_control>=300) { send(m,ZM_CLOSE); m->last_control=now; }
         break;
     case ZM_CONNECTED:
+        if(m->advanced) {
+            drain_received(m);
+            if(m->ack_pending && (m->ack_count>=4 || now-m->ack_at>=32)) send(m,ZM_ACK);
+        }
         if(now-m->last_rx>=(m->advanced?30000u:10000u)) { m->last_fault=2; close_call(m,true); break; }
         if(now-m->last_ping>=1000+m->number%251) { send(m,ZM_PING); m->last_ping=now; }
         if(m->escape_count && now-m->escape_at>=m->guard_ms) {
@@ -396,7 +469,8 @@ void zm_tick(struct zm_modem *m, uint64_t now) {
         if(m->recovering) break;
         if(m->training) {
             unsigned interval=(ZM_PAYLOAD*8000+rates[m->profile]-1)/rates[m->profile];
-            interval+=(unsigned)((m->number ^ ((uint64_t)m->probe_seq*2654435761u))%23);
+            unsigned jitter=interval/8+1; if(jitter>23) jitter=23;
+            interval+=(unsigned)((m->number ^ ((uint64_t)m->probe_seq*2654435761u))%jitter);
             if(now-m->train_at>=60000) { close_call(m,true); break; }
             if(m->probes<8 && now-m->probe_at>=interval) {
                 uint8_t pattern[ZM_PAYLOAD]; for(unsigned i=0;i<sizeof(pattern);i++) pattern[i]=(uint8_t)(i*73+m->probes);
@@ -414,7 +488,33 @@ void zm_tick(struct zm_modem *m, uint64_t now) {
             }
             break;
         }
-        if(m->advanced && !m->inflight && now<m->next_data) break;
+        if(m->advanced) {
+            /* Retransmit only missing packets, while later packets remain buffered. */
+            unsigned retry=m->rtt_ms*3+20; if(retry<100) retry=100; if(retry>250) retry=250;
+            bool sent=false;
+            for(unsigned i=0;i<ZM_WINDOW;i++) {
+                struct zm_slot *slot=&m->tx_window[i];
+                if(slot->used && now-slot->sent>=retry) {
+                    slot->sent=now; m->retries++; m->failures++;
+                    unsigned min=m->peer_min>m->min_profile?m->peer_min:m->min_profile;
+                    if(m->adaptive && m->failures%16==0 && m->profile>min) m->profile--;
+                    send_to(m,ZM_DATA,m->peer,m->session,slot->seq,slot->data,slot->len); sent=true; break;
+                }
+            }
+            if(!sent && m->qlen && m->tx_seq-m->tx_base<ZM_WINDOW && now*1000>=m->next_data) {
+                if(m->tx_seq==UINT32_MAX) { close_call(m,true); break; }
+                struct zm_slot *slot=&m->tx_window[m->tx_seq%ZM_WINDOW];
+                slot->seq=m->tx_seq++; slot->used=true; slot->sent=now;
+                slot->len=m->qlen<ZM_PAYLOAD?m->qlen:ZM_PAYLOAD;
+                for(size_t i=0;i<slot->len;i++) { slot->data[i]=m->queue[m->qhead]; m->qhead=(m->qhead+1)%ZM_QUEUE; }
+                m->qlen-=slot->len; m->inflight=true;
+                uint64_t spacing=slot->len*UINT64_C(8000000)/rates[m->profile];
+                if(now*1000>m->next_data+spacing) m->next_data=now*1000;
+                m->next_data+=spacing;
+                send_to(m,ZM_DATA,m->peer,m->session,slot->seq,slot->data,slot->len);
+            }
+            break;
+        }
         if(!m->inflight && m->qlen) {
             m->pending_len=m->qlen<ZM_PAYLOAD?m->qlen:ZM_PAYLOAD;
             for(size_t i=0;i<m->pending_len;i++) {
@@ -437,4 +537,6 @@ void zm_tick(struct zm_modem *m, uint64_t now) {
     case ZM_IDLE: break;
     }
 }
-void zm_overrun(struct zm_modem *m) { m->overruns++; m->last_fault=1; close_call(m,true); }
+void zm_overrun(struct zm_modem *m) {
+    m->overruns++; m->last_fault=1; m->command_len=0; m->overflow=false; close_call(m,true);
+}

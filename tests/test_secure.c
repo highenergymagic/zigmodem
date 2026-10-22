@@ -6,7 +6,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-struct end { struct zs_link s; struct zm_modem m; uint8_t output[8192]; size_t len; };
+struct end { struct zs_link s; struct zm_modem m; uint8_t output[8192], pin[16]; size_t len; bool pinned; };
 static struct end a,b;
 struct packet { struct end *dst; uint8_t f[ZS_WIRE_MAX]; size_t n; };
 static struct packet q[4096],saved[4];
@@ -19,6 +19,7 @@ static bool change(void *ctx,unsigned channel) {
     return !(e->s.hs && e->s.now-e->s.started<2000);
 }
 static void wire(void *ctx,const uint8_t *p,size_t n) {
+    assert(n<=108);
     struct end *e=ctx; count++;
     struct end *other=e==&a?&b:&a;
     if((drop && count%drop==0) || e->m.channel!=other->m.channel || e->m.channel==jammed) return;
@@ -32,6 +33,16 @@ static bool serial(void *ctx,const uint8_t *p,size_t n) {
 }
 static void plain(void *ctx,const uint8_t *p,size_t n) { zm_receive(&((struct end *)ctx)->m,p,n); }
 static bool accept(void *ctx) { return ((struct end *)ctx)->m.state==ZM_IDLE; }
+static bool trust(void *ctx,const uint8_t id[16]) {
+    struct end *e=ctx;
+    if(e->pinned) return !memcmp(e->pin,id,16);
+    memcpy(e->pin,id,16); e->pinned=true; return true;
+}
+static bool lookup(void *ctx,unsigned index,uint8_t id[16]) {
+    struct end *e=ctx;
+    if(index!=1 || !e->pinned) return false;
+    memcpy(id,e->pin,16); return true;
+}
 static void radio(void *ctx,const uint8_t *p,size_t n) {
     struct end *e=ctx; zs_send(&e->s,p,n,e->m.peer_identity);
 }
@@ -52,15 +63,15 @@ static void setup(void) {
     struct end *ends[]={&a,&b};
     for(unsigned i=0;i<2;i++) {
         uint8_t key[32]; memset(key,(int)(i+1),sizeof(key)); struct end *e=ends[i];
-        assert(zs_init(&e->s,key,(struct zs_io){e,wire,plain,accept}));
+        assert(zs_init(&e->s,key,(struct zs_io){e,wire,plain,accept,trust}));
         e->s.compression=true;
         zm_init(&e->m,e->s.number,100+i,(struct zm_io){e,radio,serial});
         zm_set_identity(&e->m,e->s.identity); cmd(e,"ATE0\r"); e->len=0;
-        zm_enable_link(&e->m,(struct zm_link_ops){e,change});
+        zm_enable_link(&e->m,(struct zm_link_ops){e,change,trust,lookup});
         cmd(e,"AT+MS=0,300,300\rAT%C0\rAT&K4\r");
         assert(e->m.max_profile==0 && !e->m.compression && e->m.software_flow);
         cmd(e,"AT&F\rATE0\r");
-        assert(e->m.max_profile==4 && e->m.compression && !e->m.software_flow);
+        assert(e->m.max_profile==ZM_RATE_COUNT-1 && e->m.compression && !e->m.software_flow);
     }
 }
 static void dial(bool wrong) {
@@ -83,7 +94,7 @@ int main(void) {
     assert(b.len==before);
     /* An unauthenticated high counter must not prevent later legitimate traffic. */
     for(unsigned i=0;i<save_count;i++) {
-        saved[i].f[28]=0xff; saved[i].f[29]=0xff; saved[i].f[saved[i].n-1]^=1;
+        saved[i].f[4]=0xff; saved[i].f[5]=0xff; saved[i].f[saved[i].n-1]^=1;
         zs_receive(&b.s,saved[i].f,saved[i].n);
     }
     cmd(&a,"still works"); advance(1000); assert(b.len==before+11);
@@ -96,6 +107,19 @@ int main(void) {
     assert(a.m.state==ZM_CONNECTED && !a.m.online);
     cmd(&a,"ATO1\r"); advance(20000); assert(a.m.online);
     setup(); dial(true); advance(5000); assert(!a.m.online && !b.m.online && b.m.state==ZM_IDLE);
+    /* Short numeric calls pin full identities; a changed pin fails closed. */
+    setup(); char numeric[32]; snprintf(numeric,sizeof(numeric),"ATDT%llu\r",(unsigned long long)b.m.number);
+    assert(b.m.number>=1000000000 && b.m.number<=9999999999ULL);
+    cmd(&b,"ATS0=1\r"); cmd(&a,numeric); advance(10000);
+    assert(a.m.online && b.m.online && a.pinned && b.pinned);
+    advance(1200); cmd(&a,"+++"); advance(1100); cmd(&a,"ATH\r"); advance(4000);
+    cmd(&a,"ATDT1\r"); advance(10000); assert(a.m.online && b.m.online);
+    advance(1200); cmd(&a,"+++"); advance(1100);
+    /* CLOSED arriving between UART chunks must not erase the next command. */
+    assert(zm_input(&a.m,(const uint8_t *)"ATH\rAT+STA",10)==10);
+    drain(); assert(a.m.command_len==6); a.len=0;
+    cmd(&a,"TS?\r"); assert(strstr((const char *)a.output,"TX=")); advance(4000);
+    a.pin[15]^=1; cmd(&a,numeric); advance(10000); assert(!a.m.online && !b.m.online);
     /* New responder boot must not accept recordings from an old session. */
     setup(); dial(false); advance(4000); capture=true; cmd(&a,"old"); advance(1000); capture=false;
     zs_reset(&b.s); b.m.state=ZM_IDLE; before=b.len;

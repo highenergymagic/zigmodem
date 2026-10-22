@@ -54,7 +54,7 @@ To restore a verified full backup intentionally, use
 This erases flash, writes the backup and verifies it; reset the device afterward.
 It replaces the identity too. Keep the original CCFG intact in a recovery image.
 
-Version 0.2 reserves `0x50000..0x53fff` for identity storage. Its application
+Versions 0.2 and later reserve `0x50000..0x53fff` for identity storage. Its application
 region ends before this; CCFG remains at the chip's original address. The
 upgrade helper erases/writes only populated 8 KiB HEX pages and verifies the
 storage CRC is unchanged. **Do not mass erase for normal upgrades.** A full
@@ -63,9 +63,10 @@ restore or mass erase intentionally discards the current cryptographic identity.
 ## ZBDongle-E
 
 EFR32MG21A020F768, 768 KiB flash, 64 KiB SRAM. UART USART0 PB0 RX / PB1 TX.
-The application UART runs at 9600 baud; the Gecko bootloader still uses 115200.
-At 115200, hardware RX overruns occurred during real duplex radio transfers.
-The interrupt-driven UART backend does not yet use DMA or hardware flow control.
+The application and Gecko bootloader both use 115200 baud. Version 0.3 uses
+the USART asynchronous API with LDMA RX/TX and alternating receive buffers.
+This replaces the interrupt-only E backend that previously overran at 115200.
+The P retains its interrupt-driven UART backend. There is no hardware flow control.
 Optional software XON/XOFF flow control is available with `AT&K4`.
 Zephyr's A-series device declaration names the 1024 KiB variant; this board
 explicitly constrains flash and RAM to the smaller physical chip. HFXO CTUNE
@@ -89,13 +90,13 @@ python tools/serial_probe.py /dev/ttyUSB0
 The packaging tool validates the vector table, appends Gecko application
 properties, sets vector word 13, and asks Commander to add the application
 CRC and construct the GBL. It never includes bootloader bytes.
-Version 0.2 reserves `0xb8000..0xbbfff` for identity storage. The application
+Versions 0.2 and later reserve `0xb8000..0xbbfff` for identity storage. The application
 link region ends at `0xb8000`; application-only upgrades preserve this partition.
 
 ## Persistent identity
 
 Each device creates a private X25519 key using hardware entropy on its first
-0.2 boot, saves it with Zephyr NVS data CRC, and reads it back before use.
+0.2-or-later boot, saves it with Zephyr NVS data CRC, and reads it back before use.
 Subsequent boots use that key. `AT&F` does not delete it. Missing storage
 initializes a new identity; corrupt/unreadable key records fail startup rather
 than silently substituting a new key. The key is not embedded in build outputs,
@@ -104,7 +105,12 @@ phone numbers across repeated application upgrades during development.
 
 The key is stored in ordinary flash, not a hardware secure element. Recovery
 and debug access remain available; this does not provide physical-tamper security.
-Losing/erasing the identity partition changes the phone number.
+Losing/erasing the identity partition changes the phone number. Version 0.3
+keeps the same key but exposes a ten-digit derived number through `AT+PHONUM?`;
+`AT+IDENT?` still exposes the original full fingerprint. Sixteen full peer
+fingerprints are stored in NVS IDs 0x100..0x10f beside the identity at ID 1.
+`AT+PIN=<verified fingerprint>` provisions an entry; `AT+BOOK?` lists the entries.
+Ordinary upgrades preserve all of them. `AT&F` does not clear them.
 
 The tested CP2102N-based V2 board supports `rts_dtr` bootloader entry. Other
 revisions may require the physical BOOT button. Verify entry before replacing

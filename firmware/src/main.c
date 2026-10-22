@@ -22,6 +22,8 @@ static struct net_if *iface;
 static struct zm_modem modem;
 static struct zs_link secure;
 extern int identity_load(uint8_t key[32]);
+extern bool identity_trust(void *,const uint8_t[16]);
+extern bool identity_lookup(void *,unsigned,uint8_t[16]);
 static uint8_t mac_seq;
 RING_BUF_DECLARE(serial_rx_queue,8192);
 RING_BUF_DECLARE(serial_tx_queue,4096);
@@ -32,6 +34,51 @@ static unsigned tx_fail_streak;
 struct rx_frame { uint8_t bytes[127]; uint8_t len; int16_t rssi; };
 K_MSGQ_DEFINE(radio_rx,sizeof(struct rx_frame),8,4);
 
+static void serial_kick(void) {
+#if !defined(CONFIG_UART_SILABS_USART_ASYNC)
+    uart_irq_tx_enable(uart);
+#endif
+}
+static void serial_receive(const uint8_t *bytes,size_t n) {
+    for(size_t i=0;i<n;i++) {
+        if(atomic_get(&flow_enabled) && (bytes[i]==0x11 || bytes[i]==0x13)) {
+            atomic_set(&host_paused,bytes[i]==0x13);
+            if(bytes[i]==0x11) serial_kick();
+        } else if(ring_buf_put(&serial_rx_queue,bytes+i,1)!=1) atomic_set(&overrun,1);
+    }
+}
+#if defined(CONFIG_UART_SILABS_USART_ASYNC)
+static uint8_t dma_rx[2][512],dma_tx[256];
+static unsigned dma_next;
+static atomic_t dma_busy;
+static void serial_event(const struct device *dev,struct uart_event *evt,void *ctx) {
+    ARG_UNUSED(ctx);
+    switch(evt->type) {
+    case UART_RX_RDY: serial_receive(evt->data.rx.buf+evt->data.rx.offset,evt->data.rx.len); break;
+    case UART_RX_BUF_REQUEST:
+        if(uart_rx_buf_rsp(dev,dma_rx[dma_next],sizeof(dma_rx[0]))) atomic_set(&overrun,1);
+        dma_next^=1; break;
+    case UART_RX_STOPPED: atomic_set(&overrun,1); break;
+    case UART_RX_DISABLED:
+        dma_next=1;
+        if(uart_rx_enable(dev,dma_rx[0],sizeof(dma_rx[0]),1000)) atomic_set(&overrun,1);
+        break;
+    case UART_TX_ABORTED: atomic_set(&overrun,1); atomic_clear(&dma_busy); break;
+    case UART_TX_DONE: atomic_clear(&dma_busy); break;
+    default: break;
+    }
+}
+static void serial_pump(void) {
+    if(!atomic_cas(&dma_busy,0,1)) return;
+    uint8_t control=(uint8_t)atomic_get(&flow_pending); size_t n=0;
+    if(control) { dma_tx[0]=control; n=1; }
+    else if(!atomic_get(&host_paused)) n=ring_buf_peek(&serial_tx_queue,dma_tx,sizeof(dma_tx));
+    if(!n) { atomic_clear(&dma_busy); return; }
+    if(uart_tx(uart,dma_tx,n,SYS_FOREVER_US)) { atomic_clear(&dma_busy); atomic_set(&overrun,1); return; }
+    if(control) atomic_cas(&flow_pending,control,0);
+    else { uint8_t discard[sizeof(dma_tx)]; (void)ring_buf_get(&serial_tx_queue,discard,n); }
+}
+#else
 static void uart_isr(const struct device *dev,void *ctx) {
     ARG_UNUSED(ctx);
     for(;;) {
@@ -40,12 +87,7 @@ static void uart_isr(const struct device *dev,void *ctx) {
         if(uart_irq_rx_ready(dev)) {
             uint8_t bytes[32]; int n;
             while((n=uart_fifo_read(dev,bytes,sizeof(bytes)))>0) {
-                for(int i=0;i<n;i++) {
-                    if(atomic_get(&flow_enabled) && (bytes[i]==0x11 || bytes[i]==0x13)) {
-                        atomic_set(&host_paused,bytes[i]==0x13);
-                        if(bytes[i]==0x11) uart_irq_tx_enable(dev);
-                    } else if(ring_buf_put(&serial_rx_queue,bytes+i,1)!=1) atomic_set(&overrun,1);
-                }
+                serial_receive(bytes,(size_t)n);
             }
         }
         if(uart_irq_tx_ready(dev)) {
@@ -63,10 +105,11 @@ static void uart_isr(const struct device *dev,void *ctx) {
     }
     if(uart_err_check(dev)>0) atomic_set(&overrun,1);
 }
+#endif
 static bool serial_out(void *ctx,const uint8_t *p,size_t n) {
     ARG_UNUSED(ctx); unsigned key=irq_lock();
     if(ring_buf_space_get(&serial_tx_queue)<n) { irq_unlock(key); return false; }
-    ring_buf_put(&serial_tx_queue,p,n); uart_irq_tx_enable(uart); irq_unlock(key); return true;
+    ring_buf_put(&serial_tx_queue,p,n); serial_kick(); irq_unlock(key); return true;
 }
 static enum net_verdict l2_recv(struct net_if *dev,struct net_pkt *pkt) {
     ARG_UNUSED(dev); struct rx_frame f;
@@ -140,7 +183,7 @@ int main(void) {
     iface=net_if_lookup_by_dev(radio);
     if(!iface) fatal("\r\nRADIO INTERFACE ERROR\r\n");
     uint64_t nonce; uint8_t key[32];
-    if(identity_load(key) || !zs_init(&secure,key,(struct zs_io){NULL,wire_out,plain_in,accept_call}) ||
+    if(identity_load(key) || !zs_init(&secure,key,(struct zs_io){NULL,wire_out,plain_in,accept_call,identity_trust}) ||
        sys_csrand_get(&nonce,sizeof(nonce))) fatal("\r\nIDENTITY/ENTROPY ERROR\r\n");
     noise_clean(key,sizeof(key));
     zm_init(&modem,secure.number,nonce,(struct zm_io){NULL,radio_out,serial_out});
@@ -151,17 +194,22 @@ int main(void) {
     if(api->filter(radio,true,IEEE802154_FILTER_TYPE_SHORT_ADDR,&filter)) fatal("\r\nADDRESS ERROR\r\n");
     if(api->set_channel(radio,CHANNEL) || api->set_txpower(radio,5) || api->start(radio))
         fatal("\r\nRADIO START ERROR\r\n");
-    zm_enable_link(&modem,(struct zm_link_ops){NULL,change_channel});
+    zm_enable_link(&modem,(struct zm_link_ops){NULL,change_channel,identity_trust,identity_lookup});
+#if defined(CONFIG_UART_SILABS_USART_ASYNC)
+    dma_next=1;
+    if(uart_callback_set(uart,serial_event,NULL) || uart_rx_enable(uart,dma_rx[0],sizeof(dma_rx[0]),1000)) fatal("\r\nUART DMA ERROR\r\n");
+#else
     uart_irq_callback_user_data_set(uart,uart_isr,NULL); uart_irq_rx_enable(uart);
+#endif
     uint8_t input[128]; size_t pending=0;
     for(;;) {
         bool enabled=modem.software_flow;
         atomic_set(&flow_enabled,enabled);
-        if(!enabled && atomic_cas(&host_paused,1,0)) uart_irq_tx_enable(uart);
+        if(!enabled && atomic_cas(&host_paused,1,0)) serial_kick();
         size_t queued=ring_buf_size_get(&serial_rx_queue)+modem.qlen;
         bool pause=enabled && (input_paused?queued>1024:queued>4096);
         if(pause!=input_paused) {
-            input_paused=pause; atomic_set(&flow_pending,pause?0x13:0x11); uart_irq_tx_enable(uart);
+            input_paused=pause; atomic_set(&flow_pending,pause?0x13:0x11); serial_kick();
         }
         secure.compression=modem.compression;
         modem.authenticated_frames=secure.authenticated;
@@ -176,15 +224,19 @@ int main(void) {
             unsigned key=irq_lock(); ring_buf_reset(&serial_rx_queue); irq_unlock(key); }
         struct rx_frame f;
         while(!k_msgq_get(&radio_rx,&f,K_NO_WAIT)) {
-            if(f.len>=MAC_HEADER+ZM_HEADER && sys_get_le16(f.bytes)==0xc841 &&
+            if(f.len>=MAC_HEADER+4 && sys_get_le16(f.bytes)==0xc841 &&
                sys_get_le16(f.bytes+3)==PAN && sys_get_le16(f.bytes+5)==0xffff &&
-               !memcmp(f.bytes+7,f.bytes+MAC_HEADER+4,8)) {
+               ((f.bytes[MAC_HEADER+3]>=4 && sys_get_le64(f.bytes+7)==secure.peer) ||
+                (f.len>=MAC_HEADER+44 && !memcmp(f.bytes+7,f.bytes+MAC_HEADER+4,8)))) {
                 modem.last_rssi=f.rssi;
                 zs_receive(&secure,f.bytes+MAC_HEADER,f.len-MAC_HEADER);
             }
         }
         if(!pending) { unsigned key=irq_lock(); pending=ring_buf_get(&serial_rx_queue,input,sizeof(input)); irq_unlock(key); }
         if(pending) { size_t n=zm_input(&modem,input,pending); pending-=n; memmove(input,input+n,pending); }
+#if defined(CONFIG_UART_SILABS_USART_ASYNC)
+        serial_pump();
+#endif
         k_sleep(K_MSEC(1));
     }
     return 0;
