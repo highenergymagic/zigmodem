@@ -29,6 +29,11 @@ and can be rerun. These changes are not upstreamed yet.
 The TI receive CCA correlation operator is corrected from OR to AND to match
 its declared CCA mode 3 and TI's reference driver. This removed repeated
 channel-busy transmit failures in the hardware qualification.
+Version 0.4 also exposes a forced TI receiver restart after energy detection;
+without it the receiver can remain stopped after a channel-survey slot.
+Both endpoints must run v0.4 for the new survey protocol. Application updates
+retain the existing identity and phone book; settings default to adaptive
+300–28800 bit/s with proactive surveys enabled.
 
 ## ZBDongle-P
 

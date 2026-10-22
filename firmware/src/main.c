@@ -31,6 +31,24 @@ static atomic_t overrun;
 static atomic_t flow_enabled, host_paused, flow_pending;
 static bool input_paused;
 static unsigned tx_fail_streak;
+K_SEM_DEFINE(energy_done,0,1);
+static atomic_t energy_value;
+static void energy_result(const struct device *dev,int16_t value) {
+    ARG_UNUSED(dev); atomic_set(&energy_value,value); k_sem_give(&energy_done);
+}
+static int measure_energy(void *ctx,unsigned duration) {
+    ARG_UNUSED(ctx);
+    if(!api->ed_scan) return 127;
+    k_sem_reset(&energy_done); atomic_set(&energy_value,127);
+    int result=api->ed_scan(radio,(uint16_t)duration,energy_result);
+    if(!result) result=k_sem_take(&energy_done,K_MSEC(100));
+#if defined(CONFIG_SOC_CC2652P)
+    extern int zigmodem_ti_resume_rx(const struct device *dev);
+    if(zigmodem_ti_resume_rx(radio)) result=-1;
+#endif
+    int value=(int)atomic_get(&energy_value);
+    return !result && value>-128 && value<0?value:127;
+}
 struct rx_frame { uint8_t bytes[127]; uint8_t len; int16_t rssi; };
 K_MSGQ_DEFINE(radio_rx,sizeof(struct rx_frame),8,4);
 
@@ -138,8 +156,11 @@ static void wire_out(void *ctx,const uint8_t *p,size_t n) {
     struct net_pkt *pkt=net_pkt_alloc_with_buffer(iface,n+MAC_HEADER,NET_AF_UNSPEC,0,K_NO_WAIT);
     if(!pkt) { modem.radio_errors++; return; }
     if(!net_pkt_write(pkt,f,n+MAC_HEADER)) {
+        uint32_t began=k_cycle_get_32();
         if(api->tx(radio,IEEE802154_TX_MODE_CSMA_CA,pkt,pkt->frags)) { modem.radio_errors++; tx_fail_streak++; }
         else tx_fail_streak=0;
+        modem.radio_us+=(uint32_t)k_cyc_to_us_floor32(k_cycle_get_32()-began);
+        modem.radio_bytes+=(uint32_t)(n+MAC_HEADER+2);
     }
     net_pkt_unref(pkt);
 #if defined(CONFIG_SOC_CC2652P)
@@ -148,7 +169,10 @@ static void wire_out(void *ctx,const uint8_t *p,size_t n) {
 #endif
 }
 static void radio_out(void *ctx,const uint8_t *p,size_t n) {
-    ARG_UNUSED(ctx); zs_send(&secure,p,n,modem.peer_identity);
+    ARG_UNUSED(ctx); uint32_t began=k_cycle_get_32(),radio_before=modem.radio_us;
+    zs_send(&secure,p,n,modem.peer_identity);
+    uint32_t elapsed=(uint32_t)k_cyc_to_us_floor32(k_cycle_get_32()-began);
+    if(elapsed>=modem.radio_us-radio_before) modem.crypto_us+=elapsed-(modem.radio_us-radio_before);
 }
 static void plain_in(void *ctx,const uint8_t *p,size_t n) {
     ARG_UNUSED(ctx);
@@ -194,7 +218,7 @@ int main(void) {
     if(api->filter(radio,true,IEEE802154_FILTER_TYPE_SHORT_ADDR,&filter)) fatal("\r\nADDRESS ERROR\r\n");
     if(api->set_channel(radio,CHANNEL) || api->set_txpower(radio,5) || api->start(radio))
         fatal("\r\nRADIO START ERROR\r\n");
-    zm_enable_link(&modem,(struct zm_link_ops){NULL,change_channel,identity_trust,identity_lookup});
+    zm_enable_link(&modem,(struct zm_link_ops){NULL,change_channel,identity_trust,identity_lookup,measure_energy});
 #if defined(CONFIG_UART_SILABS_USART_ASYNC)
     dma_next=1;
     if(uart_callback_set(uart,serial_event,NULL) || uart_rx_enable(uart,dma_rx[0],sizeof(dma_rx[0]),1000)) fatal("\r\nUART DMA ERROR\r\n");
@@ -219,7 +243,7 @@ int main(void) {
         modem.wire_rx=secure.wire_rx; modem.invalid_wire=secure.invalid_wire;
         modem.wire_type=secure.last_type; modem.wire_length=secure.last_length;
         zs_tick(&secure,k_uptime_get());
-        zm_tick(&modem,k_uptime_get());
+        modem.now=k_uptime_get();
         if(atomic_cas(&overrun,1,0)) { zm_overrun(&modem); pending=0;
             unsigned key=irq_lock(); ring_buf_reset(&serial_rx_queue); irq_unlock(key); }
         struct rx_frame f;
@@ -234,6 +258,7 @@ int main(void) {
         }
         if(!pending) { unsigned key=irq_lock(); pending=ring_buf_get(&serial_rx_queue,input,sizeof(input)); irq_unlock(key); }
         if(pending) { size_t n=zm_input(&modem,input,pending); pending-=n; memmove(input,input+n,pending); }
+        zm_tick(&modem,k_uptime_get());
 #if defined(CONFIG_UART_SILABS_USART_ASYNC)
         serial_pump();
 #endif

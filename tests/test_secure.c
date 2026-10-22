@@ -71,7 +71,7 @@ static void setup(void) {
         cmd(e,"AT+MS=0,300,300\rAT%C0\rAT&K4\r");
         assert(e->m.max_profile==0 && !e->m.compression && e->m.software_flow);
         cmd(e,"AT&F\rATE0\r");
-        assert(e->m.max_profile==ZM_RATE_COUNT-1 && e->m.compression && !e->m.software_flow);
+        assert(e->m.max_profile==7 && e->m.compression && !e->m.software_flow);
     }
 }
 static void dial(bool wrong) {

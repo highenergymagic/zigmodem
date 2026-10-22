@@ -9,17 +9,18 @@
 #define ZM_HEADER 40
 #define ZM_FRAME (ZM_HEADER + ZM_PAYLOAD)
 #define ZM_QUEUE 2048
-#define ZM_WINDOW 8
-#define ZM_RATE_COUNT 10
+#define ZM_WINDOW 4
+#define ZM_RATE_COUNT 12
 struct zm_slot { uint8_t data[ZM_PAYLOAD]; size_t len; uint32_t seq; uint64_t sent; bool used; };
 enum zm_state { ZM_IDLE, ZM_DIALING, ZM_RINGING, ZM_ANSWERING, ZM_CONNECTED, ZM_CLOSING };
 enum zm_type { ZM_CALL=1, ZM_ACCEPT, ZM_CONFIRM, ZM_BUSY, ZM_DATA, ZM_ACK,
-               ZM_PING, ZM_PONG, ZM_CLOSE, ZM_CLOSED, ZM_WAIT, ZM_PROBE, ZM_PROBE_ACK };
+               ZM_PING, ZM_PONG, ZM_CLOSE, ZM_CLOSED, ZM_WAIT, ZM_PROBE, ZM_PROBE_ACK, ZM_SURVEY };
 struct zm_link_ops {
     void *ctx;
     bool (*channel)(void *,unsigned);
     bool (*pin)(void *,const uint8_t[16]);
     bool (*lookup)(void *,unsigned,uint8_t[16]);
+    int (*energy)(void *,unsigned);
 };
 /* Callbacks are synchronous and must not reenter the modem. Serial must accept
  * the entire buffer or none; radio may drop a frame (the protocol retries).
@@ -39,6 +40,7 @@ struct zm_modem {
     uint32_t random_state, retry_ms, last_fault;
     uint32_t radio_errors;
     uint32_t radio_status;
+    uint32_t radio_us, crypto_us, radio_bytes;
     int16_t last_rssi;
     bool secure_identity;
     uint8_t identity[16], peer_identity[16];
@@ -59,9 +61,15 @@ struct zm_modem {
     unsigned secure_stage;
     uint32_t wire_rx, invalid_wire;
     unsigned wire_type, wire_length;
+    bool survey_enabled, survey_sampled;
+    unsigned survey_state, survey_index, survey_origin, survey_round;
+    uint32_t survey_id, surveys, survey_moves;
+    uint64_t survey_due, survey_at, survey_start, survey_end, survey_tx;
+    int survey_local, channel_energy[5];
+    uint64_t channel_measured[5];
     enum zm_state state;
     bool online, echo, verbose, quiet, inflight, overflow, serial_failed;
-    unsigned autoanswer, rings, dial_seconds, guard_ms, escape_count;
+    unsigned autoanswer, rings, dial_seconds, guard_ms, escape_count, escape_char;
     uint8_t queue[ZM_QUEUE], pending[ZM_PAYLOAD];
     size_t qhead, qlen, pending_len;
     char command[128];
@@ -77,4 +85,9 @@ void zm_receive(struct zm_modem *, const uint8_t *, size_t);
 size_t zm_input(struct zm_modem *, const uint8_t *, size_t);
 /* Platform reports unrecoverable UART overrun: fail the call, never hide loss. */
 void zm_overrun(struct zm_modem *);
+/* Authenticated channel management, shared with the portable tests. */
+void zm_control(struct zm_modem *,unsigned,uint32_t,const uint8_t *,size_t);
+void zm_retrain(struct zm_modem *);
+bool zm_survey_tick(struct zm_modem *);
+void zm_survey_receive(struct zm_modem *,uint32_t,const uint8_t *);
 #endif

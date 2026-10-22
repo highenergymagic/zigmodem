@@ -21,6 +21,19 @@ elif source.count(old) == 1:
 else:
     raise SystemExit("Unexpected driver version; refusing to patch")
 
+# TI energy detection stops the background receiver. Restore it with a forced
+# same-channel restart; the public start() hook alone does not restart RX.
+ti_radio = root / "drivers/ieee802154/ieee802154_cc13xx_cc26xx.c"
+ti_source = ti_radio.read_text()
+if 'int zigmodem_ti_resume_rx(' not in ti_source:
+    ti_source += '''
+int zigmodem_ti_resume_rx(const struct device *dev)
+{
+    return ieee802154_cc13xx_cc26xx_reset_channel(dev);
+}
+'''
+    ti_radio.write_text(ti_source)
+
 old = "\tieee802154_init(iface);"
 new = "#if !defined(CONFIG_NET_L2_CUSTOM_IEEE802154)\n\tieee802154_init(iface);\n#endif"
 source = path.read_text()

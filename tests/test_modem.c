@@ -94,6 +94,26 @@ static void binary_loss(void) {
     assert(a.len==sizeof(input) && b.len==sizeof(input));
     assert(!memcmp(a.output,input,sizeof(input)) && !memcmp(b.output,input,sizeof(input)));
 }
+static void discovery_escape(void) {
+    setup(); zm_enable_link(&a.m,(struct zm_link_ops){0});
+    cmd(&a,"AT+MS?\r"); assert(strstr((char *)a.output,"1,300,28800"));
+    cmd(&a,"AT+MS=0,56000,115200\r"); assert(a.m.max_profile==11);
+    cmd(&a,"ATZ\r"); assert(a.m.max_profile==7 && a.m.adaptive);
+    cmd(&a,"AT+MS=0,64000,64000\rAT&F\r"); assert(a.m.max_profile==7);
+    setup();
+    cmd(&a,"ATI3\rAT+GMI?\rAT+GMM?\rAT+GCAP\rAT+FCLASS=?\r");
+    assert(strstr((char *)a.output,"Zigmodem 0.4"));
+    assert(strstr((char *)a.output,"High Energy Magic"));
+    assert(strstr((char *)a.output,"+GCAP: +FCLASS"));
+    a.len=0; a.output[0]=0;
+    cmd(&a,"AT+FCLASS=1\r"); assert(strstr((char *)a.output,"ERROR"));
+    cmd(&a,"ATS2=33\r"); connect_pair();
+    advance(1100); cmd(&a,"+++"); advance(1100);
+    assert(a.m.online && b.len==3 && !memcmp(b.output,"+++",3));
+    cmd(&a,"!!!"); advance(1100); assert(!a.m.online);
+    cmd(&a,"ATS2=128\rATO\r"); advance(1100);
+    cmd(&a,"!!!+++"); advance(1100); assert(a.m.online);
+}
 static void escape_backpressure(void) {
     setup(); connect_pair();
     cmd(&a,"abc+++def"); advance(500); assert(b.len==9);
@@ -129,7 +149,7 @@ static void lifecycle(void) {
     assert(b.m.state==ZM_CONNECTED);
 }
 int main(void) {
-    commands(); binary_loss(); escape_backpressure(); lifecycle();
+    commands(); binary_loss(); discovery_escape(); escape_backpressure(); lifecycle();
     puts("PASS: commands, manual/auto answer, lossy duplex 128 KiB, duplicates, escape,");
     puts("      backpressure, busy, timeout, hangup retry, overrun, stale/malformed frames");
     return 0;

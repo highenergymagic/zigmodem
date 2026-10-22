@@ -44,7 +44,7 @@ bool zs_init(struct zs_link *s,const uint8_t key[32],struct zs_io io) {
     s->number=zm_phone(s->identity); return s->number!=0;
 }
 static void header(struct zs_link *s,uint8_t h[HEAD],unsigned type,uint64_t counter) {
-    memset(h,0,HEAD); h[0]='Z'; h[1]='S'; h[2]=3; h[3]=(uint8_t)type;
+    memset(h,0,HEAD); h[0]='Z'; h[1]='S'; h[2]=4; h[3]=(uint8_t)type;
     put(h+4,s->number,8); put(h+12,s->peer,8); put(h+20,s->session,8); put(h+28,counter,8);
     /* Bytes 36..39 reserved and authenticated. */
 }
@@ -62,7 +62,7 @@ static void resend(struct zs_link *s) {
 }
 static bool start(struct zs_link *s,bool initiator) {
     s->initiator=initiator; s->started=s->now;
-    uint8_t prologue[28]={'Z','M','3',0};
+    uint8_t prologue[28]={'Z','M','4',0};
     put(prologue+4,initiator?s->number:s->peer,8);
     put(prologue+12,initiator?s->peer:s->number,8); put(prologue+20,s->session,8);
     return noise_handshakestate_new_by_name(&s->hs,"Noise_XX_25519_ChaChaPoly_BLAKE2s",
@@ -83,7 +83,7 @@ static bool split(struct zs_link *s) {
 /* Established records fit one MAC packet. Noise keys already bind both
  * identities and session; only type and the explicit nonce need airtime. */
 static void encrypted(struct zs_link *s,unsigned type,const uint8_t *p,size_t n) {
-    uint8_t wire[ZS_WIRE_MAX]={'Z','S',3,0},compact[13+ZM_PAYLOAD]; NoiseBuffer b;
+    uint8_t wire[ZS_WIRE_MAX]={'Z','S',4,0},compact[13+ZM_PAYLOAD]; NoiseBuffer b;
     if(!s->tx || s->tx_counter==UINT64_MAX) return;
     wire[3]=(uint8_t)type; put(wire+4,s->tx_counter++,8);
     size_t length=0;
@@ -163,10 +163,10 @@ static void complete(struct zs_link *s,unsigned type,uint8_t *buf,size_t n,const
 }
 void zs_receive(struct zs_link *s,const uint8_t *f,size_t n) {
     s->wire_rx++; s->last_type=n>3?f[3]:0; s->last_length=(unsigned)n;
-    if(n>=4 && f[0]=='Z' && f[1]=='S' && f[2]==3 && (f[3]==DATA || f[3]==READY)) {
+    if(n>=4 && f[0]=='Z' && f[1]=='S' && f[2]==4 && (f[3]==DATA || f[3]==READY)) {
         receive_data(s,f,n); return;
     }
-    if(n<=HEAD || n>ZS_WIRE_MAX || f[0]!='Z' || f[1]!='S' || f[2]!=3 ||
+    if(n<=HEAD || n>ZS_WIRE_MAX || f[0]!='Z' || f[1]!='S' || f[2]!=4 ||
        f[3]<HS1 || f[3]>READY || get(f+12,8)!=s->number || get(f+36,4)) { s->invalid_wire++; return; }
     uint64_t src=get(f+4,8),sid=get(f+20,8); unsigned type=f[3],i=f[40],parts=f[41];
     size_t len=(size_t)get(f+42,2),off=i*CHUNK;

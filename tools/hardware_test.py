@@ -24,6 +24,8 @@ p.add_argument("--flow", action="store_true", help="XON/XOFF; test data excludes
 p.add_argument("--direction", choices=["duplex", "dial", "answer"], default="duplex")
 p.add_argument("--fixed-rate", type=int)
 p.add_argument("--unpaced", action="store_true", help="requires --flow")
+p.add_argument("--no-scan", action="store_true")
+p.add_argument("--no-compression", action="store_true")
 args = p.parse_args()
 if args.unpaced and not args.flow: p.error("--unpaced requires --flow")
 s = serial.Serial(port=None, baudrate=args.baud, timeout=0.05, write_timeout=10, exclusive=True)
@@ -58,6 +60,8 @@ try:
     s.reset_input_buffer()
     command("ATE0")
     command("AT+PHONUM?")
+    if args.no_scan: command("AT+SCAN=0")
+    if args.no_compression: command("AT%C0")
     if args.fixed_rate: command(f"AT+MS=0,{args.fixed_rate},{args.fixed_rate}")
     if args.flow:
         command("AT&K4")
@@ -177,6 +181,8 @@ try:
     command("AT+STATS?")
     command("AT+LINK?")
     command("AT+SEC?")
+    command("AT+PERF?")
+    command("AT+SURVEY?")
 except Exception:
     time.sleep(1.2)
     s.write(b"+++")
