@@ -13,7 +13,7 @@
 
 #define MAC_HEADER 15
 #define PAN 0x5a4d
-#define CHANNEL 20
+#define CHANNEL 25
 static const struct device *uart=DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
 static const struct device *radio=DEVICE_DT_GET(DT_CHOSEN(zephyr_ieee802154));
 static const struct ieee802154_radio_api *api;
@@ -23,7 +23,7 @@ static uint8_t mac_seq;
 RING_BUF_DECLARE(serial_rx_queue,8192);
 RING_BUF_DECLARE(serial_tx_queue,4096);
 static atomic_t overrun;
-struct rx_frame { uint8_t bytes[127]; uint8_t len; };
+struct rx_frame { uint8_t bytes[127]; uint8_t len; int16_t rssi; };
 K_MSGQ_DEFINE(radio_rx,sizeof(struct rx_frame),8,4);
 
 static void uart_isr(const struct device *dev,void *ctx) {
@@ -55,7 +55,9 @@ static enum net_verdict l2_recv(struct net_if *dev,struct net_pkt *pkt) {
     size_t n=net_pkt_get_len(pkt);
     if(n<=sizeof(f.bytes)) {
         net_pkt_cursor_init(pkt);
-        if(!net_pkt_read(pkt,f.bytes,n)) { f.len=(uint8_t)n; (void)k_msgq_put(&radio_rx,&f,K_NO_WAIT); }
+        if(!net_pkt_read(pkt,f.bytes,n)) { f.len=(uint8_t)n;
+            f.rssi=net_pkt_ieee802154_rssi_dbm(pkt);
+            (void)k_msgq_put(&radio_rx,&f,K_NO_WAIT); }
     }
     net_pkt_unref(pkt); return NET_OK;
 }
@@ -73,10 +75,14 @@ static void radio_out(void *ctx,const uint8_t *p,size_t n) {
     sys_put_le16(PAN,f+3); sys_put_le16(0xffff,f+5);
     sys_put_le64(modem.number,f+7); memcpy(f+MAC_HEADER,p,n);
     struct net_pkt *pkt=net_pkt_alloc_with_buffer(iface,n+MAC_HEADER,NET_AF_UNSPEC,0,K_NO_WAIT);
-    if(!pkt) return;
+    if(!pkt) { modem.radio_errors++; return; }
     if(!net_pkt_write(pkt,f,n+MAC_HEADER))
-        (void)api->tx(radio,IEEE802154_TX_MODE_CSMA_CA,pkt,pkt->frags);
+        if(api->tx(radio,IEEE802154_TX_MODE_CSMA_CA,pkt,pkt->frags)) modem.radio_errors++;
     net_pkt_unref(pkt);
+#if defined(CONFIG_SOC_CC2652P)
+    extern uint32_t zigmodem_ti_status(const struct device *dev);
+    modem.radio_status=zigmodem_ti_status(radio);
+#endif
 }
 static void fatal(const char *s) {
     while(*s) uart_poll_out(uart,*s++);
@@ -115,8 +121,10 @@ int main(void) {
         while(!k_msgq_get(&radio_rx,&f,K_NO_WAIT)) {
             if(f.len>=MAC_HEADER+ZM_HEADER && sys_get_le16(f.bytes)==0xc841 &&
                sys_get_le16(f.bytes+3)==PAN && sys_get_le16(f.bytes+5)==0xffff &&
-               !memcmp(f.bytes+7,f.bytes+MAC_HEADER+4,8))
+               !memcmp(f.bytes+7,f.bytes+MAC_HEADER+4,8)) {
+                modem.last_rssi=f.rssi;
                 zm_receive(&modem,f.bytes+MAC_HEADER,f.len-MAC_HEADER);
+            }
         }
         if(!pending) { unsigned key=irq_lock(); pending=ring_buf_get(&serial_rx_queue,input,sizeof(input)); irq_unlock(key); }
         if(pending) { size_t n=zm_input(&modem,input,pending); pending-=n; memmove(input,input+n,pending); }
@@ -124,4 +132,3 @@ int main(void) {
     }
     return 0;
 }
-

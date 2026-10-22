@@ -28,6 +28,9 @@ struct zm_modem {
     uint32_t tx_seq, rx_seq;
     uint32_t frames_tx, frames_rx, retries, overruns, bytes_rx, bytes_acked;
     uint32_t random_state, retry_ms, last_fault;
+    uint32_t radio_errors;
+    uint32_t radio_status;
+    int16_t last_rssi;
     enum zm_state state;
     bool online, echo, verbose, quiet, inflight, overflow, serial_failed;
     unsigned autoanswer, rings, dial_seconds, guard_ms, escape_count;

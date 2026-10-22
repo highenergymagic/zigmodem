@@ -15,7 +15,7 @@ p.add_argument("role", choices=["answer", "dial"])
 p.add_argument("--number", help="Remote AT+PHONUM? value; needed for dial")
 p.add_argument("--bytes", type=int, default=4096)
 args = p.parse_args()
-s = serial.Serial(port=None, baudrate=115200, timeout=0.05, exclusive=True)
+s = serial.Serial(port=None, baudrate=9600, timeout=0.05, exclusive=True)
 s.dtr = s.rts = False
 s.port = args.port
 s.open()

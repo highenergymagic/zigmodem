@@ -1,7 +1,7 @@
 # Zigmodem wire protocol v1
 
 This is a custom application protocol over the 250 kbit/s 2.4 GHz IEEE
-802.15.4 PHY, not a Zigbee profile. Peers use channel 20 and PAN `0x5a4d`.
+802.15.4 PHY, not a Zigbee profile. Peers use channel 25 and PAN `0x5a4d`.
 One shared radio channel is half duplex; calls provide simultaneous logical
 streams using alternating packets.
 
@@ -56,7 +56,8 @@ peer after 10 seconds.
 ## Stream
 
 Each direction has an independent 32-bit sequence starting at zero and one
-outstanding DATA frame. An unacknowledged frame is retried after 200 ms.
+outstanding DATA frame. An unacknowledged frame is retried after a jittered
+150–300 ms delay to avoid synchronized collisions between the two peers.
 The receiver delivers only its next expected sequence. A duplicate of the
 previous sequence is acknowledged without redelivery. Other sequences are
 discarded. The connection closes before sequence reuse.

@@ -76,3 +76,44 @@ if new not in source:
         raise SystemExit("Unexpected Silicon Labs ACK handler")
     source = source.replace(old, new)
 path.write_text(source)
+
+# SONOFF's fitted crystal uses a different load trim than TI LaunchPads.
+# This value is read from the original ZBDongle-P CCFG MODE_CONF word.
+path = root / "soc/ti/simplelink/cc13x2_cc26x2/ccfg.c"
+source = path.read_text()
+old = "#define SET_CCFG_MODE_CONF_XOSC_CAPARRAY_DELTA 0xD5"
+new = """#if defined(CONFIG_BOARD_ZBDONGLE_P)
+#define SET_CCFG_MODE_CONF_XOSC_CAPARRAY_DELTA 0xC1
+#else
+#define SET_CCFG_MODE_CONF_XOSC_CAPARRAY_DELTA 0xD5
+#endif"""
+if new not in source:
+    if source.count(old) != 1:
+        raise SystemExit("Unexpected TI crystal trim definition")
+    path.write_text(source.replace(old, new))
+
+path = root / "drivers/ieee802154/ieee802154_cc13xx_cc26xx.c"
+source = path.read_text()
+old = "\t\tdrv_data->cmd_ieee_csma.status = IDLE;"
+new = """\t\t/* CSMA command fields are in/out: start a fresh backoff for every TX. */
+\t\tdrv_data->cmd_ieee_csma.NB = 0;
+\t\tdrv_data->cmd_ieee_csma.BE = CONFIG_IEEE802154_CC13XX_CC26XX_RADIO_CSMA_CA_MIN_BE;
+\t\tdrv_data->cmd_ieee_csma.remainingPeriods = 0;
+\t\tdrv_data->cmd_ieee_csma.status = IDLE;"""
+if new not in source:
+    if source.count(old) != 1:
+        raise SystemExit("Unexpected TI CSMA initialization")
+    path.write_text(source.replace(old, new))
+
+# Expose command status for diagnostics without logging on the modem UART.
+path = root / "drivers/ieee802154/ieee802154_cc13xx_cc26xx.c"
+source = path.read_text()
+if 'uint32_t zigmodem_ti_status(' not in source:
+    source += '''
+uint32_t zigmodem_ti_status(const struct device *dev)
+{
+    struct ieee802154_cc13xx_cc26xx_data *d = dev->data;
+    return ((uint32_t)d->cmd_ieee_csma.status << 16) | d->cmd_ieee_tx.status;
+}
+'''
+    path.write_text(source)

@@ -91,9 +91,9 @@ static void command(struct zm_modem *m) {
             } else if(strcmp(p,"STATS?")==0) {
                 snprintf(out,sizeof(out),"\r\nTX=%" PRIu32 " RX=%" PRIu32
                     " RETRY=%" PRIu32 " OVERRUN=%" PRIu32 " IN=%" PRIu32
-                    " ACKED=%" PRIu32 " FAULT=%" PRIu32 "\r\n",
+                    " ACKED=%" PRIu32 " FAULT=%" PRIu32 " RFERR=%" PRIu32 " RSSI=%d STATUS=%08" PRIx32 "\r\n",
                     m->frames_tx,m->frames_rx,m->retries,m->overruns,
-                    m->bytes_rx,m->bytes_acked,m->last_fault);
+                    m->bytes_rx,m->bytes_acked,m->last_fault,m->radio_errors,(int)m->last_rssi,m->radio_status);
                 emit(m,out); p+=strlen(p);
             } else { result(m,4); return; }
         } else if(c=='I') {

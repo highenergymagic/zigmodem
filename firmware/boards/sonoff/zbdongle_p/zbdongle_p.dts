@@ -18,11 +18,20 @@
 };
 &uart0 {
     status = "okay";
-    current-speed = <115200>;
+    current-speed = <9600>;
     pinctrl-0 = <&modem_rx &modem_tx>;
     pinctrl-names = "default";
 };
-&gpio0 { status = "okay"; };
+&gpio0 {
+    status = "okay";
+    /* SONOFF RF switch: hold the high-power path off for the 5 dBm PA.
+     * Leaving DIO29 floating can disconnect the standard TX/RX path. */
+    rf-path {
+        gpio-hog;
+        gpios = <29 GPIO_ACTIVE_HIGH>;
+        output-low;
+    };
+};
 &trng { status = "okay"; };
 &radio { status = "okay"; };
 &ieee802154 { status = "okay"; };

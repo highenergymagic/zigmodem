@@ -8,7 +8,7 @@ p = argparse.ArgumentParser()
 p.add_argument("port")
 p.add_argument("commands", nargs="*", default=["AT", "ATI", "AT+PHONUM?"])
 args = p.parse_args()
-s = serial.Serial(port=None, baudrate=115200, timeout=0.25, exclusive=True)
+s = serial.Serial(port=None, baudrate=9600, timeout=0.25, exclusive=True)
 s.dtr = False
 s.rts = False
 s.port = args.port

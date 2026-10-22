@@ -28,7 +28,7 @@
 };
 &usart0 {
     status = "okay";
-    current-speed = <115200>;
+    current-speed = <9600>;
     pinctrl-0 = <&modem_usart>;
     pinctrl-names = "default";
 };

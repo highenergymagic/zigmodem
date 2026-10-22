@@ -9,7 +9,7 @@ run Zigmodem, use the same radio channel, and be within radio range.
 
 ## Use
 
-Open the USB serial port at **115200 baud, 8N1**, with hardware and software
+Open the USB serial port at **9600 baud, 8N1**, with hardware and software
 flow control disabled. Allow about half a second after opening: some USB
 bridge revisions reset the radio when the port opens. Keep the port open for
 the duration of a call.
@@ -42,6 +42,7 @@ ring automatically. Set `ATE0` to disable command echo.
 | `AT` | Check the modem |
 | `ATI` | Firmware identification |
 | `AT+PHONUM?` | Full 64-bit device address as an unsigned decimal number |
+| `AT+STATS?` | Radio frame/retry counts, byte counts, overruns, last failure and RSSI |
 | `ATDT<number>`, `ATDP<number>` | Dial a peer |
 | `ATA` | Answer an incoming call |
 | `ATH`, `ATH0` | Hang up |
@@ -57,14 +58,23 @@ ring automatically. Set `ATE0` to disable command echo.
 Result codes: `OK`, `CONNECT`, `RING`, `NO CARRIER`, `ERROR`, `BUSY`,
 `NO ANSWER`. Unsupported commands return `ERROR`; no pretend-success stubs.
 
+`AT+STATS?` reports cumulative counters since boot. `FAULT=1` means UART
+overrun, `2` means peer silence, and `3` means the serial result queue was
+full; zero means no local fault. `RFERR` counts failed radio transmissions or
+packet allocations. RSSI is the last received Zigmodem MAC frame's signal
+strength in dBm (zero before any frame). Counters survive hangup, not reset.
+On TI, `STATUS` contains the hexadecimal CSMA status followed by TX status:
+`24002400` means both succeeded; `24010000` means channel busy, TX not started.
+On Silicon Labs this diagnostic field is zero.
+
 ## Current limits
 
-- One direct call per radio; channel 20, PAN ID `0x5a4d`, transmit power 5 dBm.
+- One direct call per radio; channel 25, PAN ID `0x5a4d`, transmit power 5 dBm.
 - No encryption or peer authentication yet. Numbers identify peers but are
   not credentials. Use this version for experiments with non-sensitive data.
 - No mesh routing, discovery directory, compression, audio, or PSTN access.
 - No DCD/RI/DTR modem semantics or UART flow control. Stock bridge wiring
-  limits these features. Pace sustained serial input; 115200 is the UART
+  limits these features. Pace sustained serial input; 9600 is the UART
   speed, not a guaranteed radio throughput. UART overrun terminates the call
   instead of silently dropping data. The hardware test uses paced writes.
 - Settings reset at boot; `AT&W` and stored profiles are not implemented.
@@ -102,6 +112,15 @@ Each prints a PTY path. Open each path with a terminal program, then dial
 transport, not the firmware's radio transport.
 
 ## Firmware
+
+The first hardware qualification passed 32 KiB in each direction with E
+dialing P, and 4 KiB in each direction with P dialing E. Both runs checked
+every byte, guarded escape, command mode, and hangup with zero UART overruns.
+The longer run took 52 seconds (about 625 bytes/s per direction with the test's
+pacing). This is a bench test of one pair, not a range or endurance rating.
+Channel 20 suffered repeated clear-channel-assessment failures in that setup;
+channel 25 worked. The application uses 9600 baud because 115200 caused an
+EFR32 UART overrun during sustained duplex traffic.
 
 See [building and recovery](docs/firmware.md) and the
 [wire protocol](docs/protocol.md). Both targets use the same C modem core and

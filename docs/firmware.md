@@ -21,7 +21,10 @@ west build -b zbdongle_e firmware -d build-e
 The preparation script applies narrowly scoped compatibility fixes to the
 pinned radio drivers: TI custom-L2 registration/initialization, Silicon Labs
 OpenThread-only headers and metadata, standalone PHY constants, and the
-lifetime of its link-address buffer. It refuses unexpected source patterns
+lifetime of its link-address buffer, and SONOFF's TI crystal load trim
+(`0xC1`, measured from the original CCFG rather than the LaunchPad's `0xD5`).
+It also resets TI's CSMA in/out backoff fields for each transmission and
+exposes its command status for diagnostics. It refuses unexpected source patterns
 and can be rerun. These changes are not upstreamed yet.
 
 ## ZBDongle-P
@@ -50,6 +53,9 @@ it, and restarts the device. Keep the original CCFG intact in a recovery image.
 ## ZBDongle-E
 
 EFR32MG21A020F768, 768 KiB flash, 64 KiB SRAM. UART USART0 PB0 RX / PB1 TX.
+The application UART runs at 9600 baud; the Gecko bootloader still uses 115200.
+At 115200, hardware RX overruns occurred during real duplex radio transfers.
+The interrupt-driven UART backend does not yet use DMA or flow control.
 Zephyr's A-series device declaration names the 1024 KiB variant; this board
 explicitly constrains flash and RAM to the smaller physical chip. HFXO CTUNE
 140 matches the inspected SONOFF firmware configuration; board revisions may
@@ -81,6 +87,13 @@ known-good vendor ZBDongle-E GBL. Network configuration can be backed up with
 The UART Gecko bootloader does not provide full application flash readback.
 
 ## Sources
+
+Release firmware includes third-party code under its original licenses;
+Zigmodem's MIT license applies to this repository's own code. Keep the
+`third-party-notices.zip` release asset with redistributed firmware. To collect
+dependency license files and notices from both completed build trees, run
+`python tools/package_notices.py /path/to/build-workspace third-party-notices.zip`.
+The build workspace must contain `build-p`, `build-e`, `zephyr`, and `modules`.
 
 - [TI board mapping and bootloader pin](https://github.com/Koenkk/Z-Stack-firmware/blob/master/coordinator/Z-Stack_3.x.0/README.md)
 - [SONOFF E board configuration](https://github.com/darkxst/silabs-firmware-builder/blob/SiSDK/manifests/sonoff/zbdonglee_zigbee_ncp.yaml)
