@@ -31,9 +31,10 @@ its declared CCA mode 3 and TI's reference driver. This removed repeated
 channel-busy transmit failures in the hardware qualification.
 Version 0.4 also exposes a forced TI receiver restart after energy detection;
 without it the receiver can remain stopped after a channel-survey slot.
-Both endpoints must run v0.4 for the new survey protocol. Application updates
-retain the existing identity and phone book; settings default to adaptive
-300–28800 bit/s with proactive surveys enabled.
+Both endpoints must run v0.5 for the expanded rate table and wire version.
+Application updates retain identity, phone book and v0.5 saved profiles. Without
+a saved profile, settings default to adaptive 300–28800 bit/s with surveys
+enabled. See [saved profiles](usr-compatibility.md) for persistence commands.
 
 ## ZBDongle-P
 

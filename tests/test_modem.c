@@ -97,12 +97,12 @@ static void binary_loss(void) {
 static void discovery_escape(void) {
     setup(); zm_enable_link(&a.m,(struct zm_link_ops){0});
     cmd(&a,"AT+MS?\r"); assert(strstr((char *)a.output,"1,300,28800"));
-    cmd(&a,"AT+MS=0,56000,115200\r"); assert(a.m.max_profile==11);
-    cmd(&a,"ATZ\r"); assert(a.m.max_profile==7 && a.m.adaptive);
-    cmd(&a,"AT+MS=0,64000,64000\rAT&F\r"); assert(a.m.max_profile==7);
+    cmd(&a,"AT+MS=0,56000,115200\r"); assert(a.m.max_profile==18);
+    cmd(&a,"ATZ\r"); assert(a.m.max_profile==13 && a.m.adaptive);
+    cmd(&a,"AT+MS=0,64000,64000\rAT&F\r"); assert(a.m.max_profile==13);
     setup();
     cmd(&a,"ATI3\rAT+GMI?\rAT+GMM?\rAT+GCAP\rAT+FCLASS=?\r");
-    assert(strstr((char *)a.output,"Zigmodem 0.4"));
+    assert(strstr((char *)a.output,"Zigmodem 0.5"));
     assert(strstr((char *)a.output,"High Energy Magic"));
     assert(strstr((char *)a.output,"+GCAP: +FCLASS"));
     a.len=0; a.output[0]=0;

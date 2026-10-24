@@ -3,7 +3,8 @@
 The Linux mgetty binary handles RING, ATA, CONNECT and the ordinary login
 program. `tools/mgetty_bridge.py` provides a bounded PTY-to-USB bridge for
 SONOFF boards whose DTR/RTS pins control reset/boot instead of carrier/flow.
-No firmware update is needed for this bridge with Zigmodem v0.4.
+The bridge works with v0.4 and v0.5. The supplied init-chat now explicitly
+selects native commands for v0.5; omit `AT+COMPAT=NATIVE OK` for v0.4.
 
 ## Install on the answering Linux host
 
@@ -22,6 +23,11 @@ sudo systemctl start zigmodem-mgetty
 sudo systemctl status zigmodem-mgetty
 sudo tail /var/log/mgetty/mg_zigmodem.log
 ```
+
+Allow about ten seconds for bridge hangup and modem initialization before
+dialing. An active systemd unit is not yet a ready modem; the mgetty log should
+show its final `waiting...` after the init-chat. Dialing during initialization
+can be disconnected by ATZ.
 
 Use `doas` instead of `sudo` where appropriate. Enable the service separately
 if you want it started at boot. Stop it before flashing or running any other
@@ -44,12 +50,14 @@ and **XON/XOFF** flow control. Leave local echo off/automatic. Send:
 
 ```text
 ATZ
+AT+COMPAT=NATIVE
 AT&K4
 ATDT<answering modem's number>
 ```
 
 After CONNECT, log in with the answering host's normal account credentials.
-`ATZ` restores defaults, so enable AT&K4 after it. Flow control reserves
+`ATZ` loads the selected saved profile on v0.5 (defaults on v0.4). Select
+native commands on v0.5, then enable AT&K4. Flow control reserves
 0x11/0x13 and is suitable for terminals; arbitrary binary transfers need an
 escaping protocol such as the documented [PPP setup](ppp.md).
 
@@ -67,7 +75,9 @@ When login exits, the bridge waits for pending UART output, sends guarded
 CLOSE exchange. The caller should receive **NO CARRIER** within a few seconds.
 Only then is the next mgetty session started. The physical UART stays open
 across sessions, avoiding a USB control-line reset between logout and hangup.
-Keep the default escape settings S2=43 and S12=50 for this service.
+Keep profile 0 selected with default escape settings S2=43, S12=50,
+S13=0 and delimiters S3=13, S4=10 for this service. Keep V1/Q0 in its
+saved profile so the initial ATZ response is visible to mgetty.
 
 A received CRLF-NO CARRIER-CRLF terminates the current server session. Because
 this is an in-band indication rather than hardware DCD, a caller sending that

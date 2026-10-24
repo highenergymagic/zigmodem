@@ -5,10 +5,15 @@ ZBDongle-E (EFR32MG21). Dial another dongle's numeric phone number, answer
 its call, and exchange a reliable binary stream over 2.4 GHz IEEE 802.15.4.
 
 This is experimental firmware, not a telephone-network modem. Both peers must
-run compatible Zigmodem firmware and be within radio range. Version 0.4 is
+run compatible Zigmodem firmware and be within radio range. Version 0.5 is
 incompatible with earlier firmware; upgrade both endpoints.
 
 ## Use
+
+Version 0.5 adds saved profiles, expanded ATI diagnostics and a selectable
+[Sportster-style data command subset](docs/usr-compatibility.md). It is not
+a drop-in Windows Sportster driver replacement; see the compatibility limits.
+
 
 For terminal dial-in with a real Linux login prompt, see the
 [mgetty bridge setup and modem controls](docs/mgetty.md). It includes a
@@ -51,7 +56,7 @@ explicit `AT+MS` setting and remain experimental; 56k has not been established.
 | Command | Meaning |
 | --- | --- |
 | `AT` | Check the modem |
-| `ATI`, `ATI0` ... `ATI4` | Firmware identification and self-test responses |
+| `ATI0`–`ATI7`, `ATI9`, `ATI11` | Identification, checksum, scratch RAM test, profiles and link diagnostics |
 | `AT+GMI`, `AT+GMM`, `AT+GMR`, `AT+GCAP` | Manufacturer, model, revision and capabilities |
 | `AT+FCLASS?`, `AT+FCLASS=?`, `AT+FCLASS=0` | Data-only service; fax classes rejected |
 | `AT+CALLCH?` | Calling channel (25) |
@@ -68,7 +73,7 @@ explicit `AT+MS` setting and remain experimental; 56k has not been established.
 | `AT+SEC?` | Cipher suite, authenticated/rejected record counts, compression savings |
 | `AT+WIRE?` | Wire-frame receive diagnostics |
 | `AT+CHANNEL=n` | Retune to a channel in the scan list; active calls recover automatically |
-| `AT+MS?`, `AT+MS=auto,min,max` | Link rate policy; auto is 0/1; rates: 300,1200,2400,4800,9600,14400,19200,28800,33600,56000,64000,115200; default `1,300,28800` |
+| `AT+MS?`, `AT+MS=auto,min,max` | Link rate policy; auto is 0/1; rates: 300,1200,2400,4800,7200,9600,12000,14400,16800,19200,21600,24000,26400,28800,31200,33600,56000,64000,115200; default `1,300,28800` |
 | `AT%C0/1` | Disable/enable outgoing block compression (default enabled) |
 | `AT&K0/4`, `AT&K?` | Flow control off / XON-XOFF, or query; default off |
 | `ATDT<number>`, `ATDP<number>` | Dial a peer |
@@ -76,7 +81,10 @@ explicit `AT+MS` setting and remain experimental; 56k has not been established.
 | `ATH`, `ATH0` | Hang up |
 | `ATO`, `ATO0` | Return from command mode to data mode |
 | `ATO1` | Retrain the current connection, then return to data mode |
-| `ATZ`, `AT&F` | Hang up and restore default settings |
+| `ATZ`, `AT&F` | Hang up and load selected saved profile / factory settings |
+| `AT&V`, `AT&W0/1`, `AT&Y0/1` | Show settings, save profile, select boot profile (native mode) |
+| `AT+COMPAT=NATIVE/USR` | Select native or Sportster-style command semantics; see compatibility guide |
+| `ATW0/1` | Basic / extended connection reports |
 | `ATE0/1` | Command echo off/on |
 | `ATV0/1` | Numeric/text result codes |
 | `ATQ0/1` | Result codes on/off |
@@ -115,7 +123,7 @@ Anyone may call; the pin book is not a caller access-control list.
 Pins persist across resets and application upgrades. `AT+BOOK?` lists up to
 16 entries. Each also has a short local alias: `ATDT1` calls entry 1 using its
 full pinned identity. Empty slots return ERROR; a full book refuses new peers.
-For the bench pair, carbon is **3793723694**, millie is **8056127476**, and
+For the bench pair, carbon is **3793723694**, the E dongle (now on Windows) is **8056127476**, and
 each has the other securely preloaded in slot **1**. Thus `ATDT1` works from
 either host, including applications limited to very short digit-only numbers.
 
@@ -198,17 +206,24 @@ Each prints a PTY path. Open each path with a terminal program, then dial
 `ATDT456` from the first. Simulator UDP is bound to loopback; it is a test
 transport, not the firmware's radio transport.
 This legacy simulator runs the plaintext modem core only. The `secure` and
-`crypto` tests exercise the v4 encrypted transport, training, channel recovery,
+`crypto` tests exercise the v5 encrypted transport, training, channel recovery,
 compression, replay rejection and independent Noise interoperability vectors.
 
 ## Firmware
 
-Version **0.4** is classified as an **experimental 28.8k modem**. The default
-rate policy is adaptive 300–28800, including after ATZ/AT&F. Rates above 28800
+Version **0.5** is classified as an **experimental 28.8k modem**. The default
+factory rate policy is adaptive 300–28800. ATZ loads the saved policy, while
+AT&F restores factory settings. Rates above 28800
 remain opt-in experiments; the earlier ~30 kbit/s one-way measurement does
 not establish 56k service or guaranteed useful throughput under every policy.
 
-The final default-policy P/E test transferred 32 KiB of incompressible data
+The v0.5 hardware check transferred 16 KiB simultaneously each way, verified
+every byte, retrained manually, and completed a survey-driven channel move.
+Initial directional rates were 26400/28800, measured payload rates were
+13.04/12.57 kbit/s, and both UART overrun counters were zero. Saved profiles,
+phone numbers and pins survived application reflashes on both boards.
+
+The v0.4 default-policy P/E test transferred 32 KiB of incompressible data
 simultaneously in each direction, verified every byte, performed six combined
 energy measurements and one coordinated channel move/retrain, and recorded
 zero UART overruns. Initial CONNECT reports were 28800 and 19200; directional

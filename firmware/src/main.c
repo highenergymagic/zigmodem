@@ -24,6 +24,8 @@ static struct zs_link secure;
 extern int identity_load(uint8_t key[32]);
 extern bool identity_trust(void *,const uint8_t[16]);
 extern bool identity_lookup(void *,unsigned,uint8_t[16]);
+extern int settings_read(void *,unsigned,uint8_t *,size_t);
+extern bool settings_write(void *,unsigned,const uint8_t *,size_t);
 static uint8_t mac_seq;
 RING_BUF_DECLARE(serial_rx_queue,8192);
 RING_BUF_DECLARE(serial_tx_queue,4096);
@@ -31,6 +33,16 @@ static atomic_t overrun;
 static atomic_t flow_enabled, host_paused, flow_pending;
 static bool input_paused;
 static unsigned tx_fail_streak;
+static uint32_t firmware_checksum(void) {
+    extern const uint8_t __rom_region_start[], __rom_region_end[];
+    uintptr_t pos=(uintptr_t)__rom_region_start,end=(uintptr_t)__rom_region_end;
+    uint32_t crc=0xffffffffu;
+    for(;pos<end;pos++) {
+        crc^=*(const volatile uint8_t *)pos;
+        for(unsigned i=0;i<8;i++) crc=(crc>>1)^((0u-(crc&1u))&0xedb88320u);
+    }
+    return ~crc;
+}
 K_SEM_DEFINE(energy_done,0,1);
 static atomic_t energy_value;
 static void energy_result(const struct device *dev,int16_t value) {
@@ -211,6 +223,7 @@ int main(void) {
        sys_csrand_get(&nonce,sizeof(nonce))) fatal("\r\nIDENTITY/ENTROPY ERROR\r\n");
     noise_clean(key,sizeof(key));
     zm_init(&modem,secure.number,nonce,(struct zm_io){NULL,radio_out,serial_out});
+    modem.firmware_crc=firmware_checksum(); modem.firmware_crc_valid=true;
     zm_set_identity(&modem,secure.identity);
     struct ieee802154_filter filter={.pan_id=PAN};
     if(api->filter(radio,true,IEEE802154_FILTER_TYPE_PAN_ID,&filter)) fatal("\r\nPAN ERROR\r\n");
@@ -219,6 +232,7 @@ int main(void) {
     if(api->set_channel(radio,CHANNEL) || api->set_txpower(radio,5) || api->start(radio))
         fatal("\r\nRADIO START ERROR\r\n");
     zm_enable_link(&modem,(struct zm_link_ops){NULL,change_channel,identity_trust,identity_lookup,measure_energy});
+    zm_set_storage(&modem,(struct zm_storage_ops){NULL,settings_read,settings_write});
 #if defined(CONFIG_UART_SILABS_USART_ASYNC)
     dma_next=1;
     if(uart_callback_set(uart,serial_event,NULL) || uart_rx_enable(uart,dma_rx[0],sizeof(dma_rx[0]),1000)) fatal("\r\nUART DMA ERROR\r\n");
@@ -227,11 +241,11 @@ int main(void) {
 #endif
     uint8_t input[128]; size_t pending=0;
     for(;;) {
-        bool enabled=modem.software_flow;
+        bool enabled=modem.flow_rx;
         atomic_set(&flow_enabled,enabled);
         if(!enabled && atomic_cas(&host_paused,1,0)) serial_kick();
         size_t queued=ring_buf_size_get(&serial_rx_queue)+modem.qlen;
-        bool pause=enabled && (input_paused?queued>1024:queued>4096);
+        bool pause=modem.flow_tx && (input_paused?queued>1024:queued>4096);
         if(pause!=input_paused) {
             input_paused=pause; atomic_set(&flow_pending,pause?0x13:0x11); serial_kick();
         }

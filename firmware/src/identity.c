@@ -10,6 +10,15 @@
 static struct nvs_fs fs;
 static uint8_t pins[16][16];
 static unsigned pin_count;
+int settings_read(void *ctx,unsigned slot,uint8_t *data,size_t size) {
+    (void)ctx; if(slot>2) return -EINVAL;
+    return (int)nvs_read(&fs,(uint16_t)(0x10+slot),data,size);
+}
+bool settings_write(void *ctx,unsigned slot,const uint8_t *data,size_t size) {
+    (void)ctx; if(slot>2) return false;
+    ssize_t n=nvs_write(&fs,(uint16_t)(0x10+slot),data,size);
+    return n==0 || n==(ssize_t)size;
+}
 bool identity_lookup(void *ctx,unsigned index,uint8_t id[16]) {
     (void)ctx;
     if(!index || index>pin_count) return false;

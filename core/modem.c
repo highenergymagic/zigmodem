@@ -4,8 +4,9 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
-static const unsigned rates[]={300,1200,2400,4800,9600,14400,19200,28800,33600,56000,64000,115200};
-#define DEFAULT_MAX_PROFILE 7 /* 28.8 kbit/s; higher rates are opt-in experiments. */
+static const unsigned rates[]={300,1200,2400,4800,7200,9600,12000,14400,16800,19200,21600,24000,26400,28800,31200,33600,56000,64000,115200};
+unsigned zm_rate(unsigned profile) { return profile<ZM_RATE_COUNT?rates[profile]:0; }
+#define DEFAULT_MAX_PROFILE 13 /* 28.8 kbit/s; higher rates are opt-in experiments. */
 static const unsigned channels[]={25,15,20,26,11};
 static void train(struct zm_modem *m) {
     m->training=true; m->probes=m->probe_acks=m->last_probe_ack=0; m->train_at=m->now; m->probe_at=0;
@@ -24,17 +25,37 @@ static void put(uint8_t *p, uint64_t v, unsigned n) {
 static uint64_t get(const uint8_t *p, unsigned n) {
     uint64_t v=0; for (unsigned i=0; i<n; i++) v |= (uint64_t)p[i] << (8*i); return v;
 }
-static void emit(struct zm_modem *m, const char *s) {
-    if (!m->io.serial(m->io.ctx, (const uint8_t *)s, strlen(s))) m->serial_failed=true;
+void zm_emit(struct zm_modem *m, const char *s) {
+    uint8_t out[256];
+    while(*s) {
+        size_t n=0;
+        while(*s && n<sizeof(out)) { unsigned char c=(unsigned char)*s++; out[n++]=(uint8_t)(c=='\r'?m->command_cr:c=='\n'?m->response_lf:c); }
+        if(!m->io.serial(m->io.ctx,out,n)) { m->serial_failed=true; return; }
+    }
 }
+#define emit zm_emit
 static void result(struct zm_modem *m, unsigned code) {
     static const char *const names[] = {"OK", "CONNECT", "RING", "NO CARRIER", "ERROR",
                                        "", "NO DIALTONE", "BUSY", "NO ANSWER"};
-    char s[40];
+    char s[160];
     if (m->quiet) return;
-    if (m->verbose && code==1 && m->advanced) snprintf(s,sizeof(s),"\r\nCONNECT %u\r\n",rates[m->profile]);
+    if(m->usr_commands && m->result_level<3 && (code==7 || code==8)) code=3;
+    if (m->verbose && code==1 && m->advanced) {
+        if(m->report_mode) {
+            snprintf(s,sizeof(s),"\r\nCARRIER %u\r\nPROTOCOL: ZIGMODEM-ARQ\r\nCOMPRESSION: %s\r\n",rates[m->profile],m->compression?"HEATSHRINK":"NONE");
+            emit(m,s);
+        }
+        if(m->result_level==0) snprintf(s,sizeof(s),"\r\nCONNECT\r\n");
+        else snprintf(s,sizeof(s),"\r\nCONNECT %u\r\n",rates[m->profile]);
+    }
     else if (m->verbose) snprintf(s,sizeof(s),"\r\n%s\r\n", names[code]);
-    else snprintf(s,sizeof(s),"%u\r",code);
+    else {
+        if(code==1 && m->advanced && m->usr_commands && m->result_level) {
+            static const unsigned numeric[]={1,5,10,18,20,13,21,25,43,85,91,99,103,107,151,155,232,1,1};
+            code=numeric[m->profile];
+        }
+        snprintf(s,sizeof(s),"%u\r",code);
+    }
     emit(m,s);
 }
 static void send_to(struct zm_modem *m, unsigned type, uint64_t dst, uint64_t session,
@@ -60,7 +81,7 @@ void zm_control(struct zm_modem *m,unsigned type,uint32_t seq,const uint8_t *dat
 void zm_retrain(struct zm_modem *m) { m->survey_state=0; m->survey_due=m->now+10000; train(m); }
 static void send(struct zm_modem *m, unsigned type) {
     if(m->advanced && (type==ZM_CALL || type==ZM_ACCEPT)) {
-        uint8_t caps[3]={4,(uint8_t)m->max_profile,(uint8_t)m->min_profile};
+        uint8_t caps[3]={5,(uint8_t)m->max_profile,(uint8_t)m->min_profile};
         send_to(m,type,m->peer,m->session,0,caps,sizeof(caps));
     } else send_to(m,type,m->peer,m->session,0,NULL,0);
 }
@@ -84,13 +105,18 @@ static void close_call(struct zm_modem *m, bool report) {
 static void connected(struct zm_modem *m) {
     m->state=ZM_CONNECTED; m->online=!m->advanced; m->last_rx=m->last_ping=m->now;
     m->last_input=m->now;
+    m->last_data_at=m->now;
     m->connect_pending=m->advanced;
     if(m->advanced) train(m); else result(m,1);
 }
 static void defaults(struct zm_modem *m) {
     m->echo=true; m->verbose=true; m->quiet=false;
     m->autoanswer=0; m->dial_seconds=30; m->guard_ms=1000;
-    m->software_flow=false; m->escape_char='+'; m->survey_enabled=true;
+    m->software_flow=m->flow_tx=m->flow_rx=false; m->escape_char='+'; m->survey_enabled=true;
+    m->report_mode=0; m->result_level=4;
+    m->command_cr=13; m->response_lf=10; m->command_bs=8;
+    m->inactivity_minutes=0; m->escape_hangup=false;
+    m->usr_ceiling=m->usr_floor=0;
     if(m->advanced) { m->min_profile=0; m->max_profile=DEFAULT_MAX_PROFILE; m->adaptive=true; m->compression=true; }
 }
 void zm_init(struct zm_modem *m, uint64_t number, uint64_t nonce, struct zm_io io) {
@@ -137,14 +163,18 @@ static void command(struct zm_modem *m) {
     s[m->command_len]=0;
     for(char *p=s; *p; p++) *p=(char)toupper((unsigned char)*p);
     if(m->overflow || s[0]!='A' || s[1]!='T') { result(m,4); return; }
+    memcpy(m->last_command,s,m->command_len+1);
     const char *p=s+2;
     while(*p) {
         char c=*p++;
         if(c==' ') continue;
         if(c=='+') {
-            if(strcmp(p,"GMI")==0 || strcmp(p,"GMI?")==0) { emit(m,"\r\nHigh Energy Magic\r\n"); p+=strlen(p);
+            if(strcmp(p,"COMPAT?")==0) { emit(m,m->usr_commands?"\r\nUSR\r\n":"\r\nNATIVE\r\n"); p+=strlen(p);
+            } else if((strcmp(p,"COMPAT=USR")==0 || strcmp(p,"COMPAT=NATIVE")==0) && m->state==ZM_IDLE) {
+                m->usr_commands=p[7]=='U'; p+=strlen(p);
+            } else if(strcmp(p,"GMI")==0 || strcmp(p,"GMI?")==0) { emit(m,"\r\nHigh Energy Magic\r\n"); p+=strlen(p);
             } else if(strcmp(p,"GMM")==0 || strcmp(p,"GMM?")==0) { emit(m,"\r\nZigmodem encrypted radio modem\r\n"); p+=strlen(p);
-            } else if(strcmp(p,"GMR")==0 || strcmp(p,"GMR?")==0) { emit(m,"\r\n0.4 experimental\r\n"); p+=strlen(p);
+            } else if(strcmp(p,"GMR")==0 || strcmp(p,"GMR?")==0) { emit(m,"\r\n0.5 experimental\r\n"); p+=strlen(p);
             } else if(strcmp(p,"GCAP")==0 || strcmp(p,"GCAP?")==0) { emit(m,"\r\n+GCAP: +FCLASS\r\n"); p+=strlen(p);
             } else if(strcmp(p,"FCLASS=?")==0 || strcmp(p,"FCLASS?")==0) { emit(m,"\r\n0\r\n"); p+=strlen(p);
             } else if(strncmp(p,"FCLASS=0",8)==0) { p+=8;
@@ -220,30 +250,84 @@ static void command(struct zm_modem *m) {
                 for(unsigned i=0;i<ZM_RATE_COUNT;i++) { if(rates[i]==low) lo=i; if(rates[i]==high) hi=i; }
                 if(lo>hi || hi>=ZM_RATE_COUNT) { result(m,4); return; }
                 m->adaptive=(bool)n; m->min_profile=lo; m->max_profile=hi;
+                m->usr_ceiling=m->usr_floor=0;
             } else { result(m,4); return; }
         } else if(c=='%' && *p++=='C' && m->advanced && (*p=='0' || *p=='1')) {
             m->compression=*p++=='1';
         } else if(c=='I') {
-            unsigned ident=0;
-            if(*p>='0' && *p<='9') ident=(unsigned)(*p++-'0');
-            if(ident==0 || ident==3) emit(m,"\r\nZigmodem 0.4 experimental\r\n");
-            else if(ident==1) emit(m,"\r\n0400\r\n");
-            else if(ident==4) emit(m,"\r\nIEEE 802.15.4 encrypted data modem\r\n");
+            n=0; if(*p>='0' && *p<='9' && !decimal(&p,&n)) { result(m,4); return; }
+            if(n>UINT32_MAX || !zm_inquiry(m,(unsigned)n)) { result(m,4); return; }
+        } else if(c=='X' || c=='W' || (c=='Y' && m->usr_commands)) {
+            n=0; if(*p>='0' && *p<='9' && !decimal(&p,&n)) { result(m,4); return; }
+            if(c=='X' && n<=4) m->result_level=(unsigned)n;
+            else if(c=='W' && n<=2) m->report_mode=(unsigned)n;
+            else if(c=='Y' && n<=4 && n!=3 && zm_select_profile(m,(unsigned)n)) { }
             else { result(m,4); return; }
         } else if(c=='E' || c=='V' || c=='Q') {
-            if(*p!='0' && *p!='1') { result(m,4); return; }
-            bool b=*p++=='1';
+            n=0; if(*p>='0' && *p<='9' && !decimal(&p,&n)) { result(m,4); return; }
+            if(n>1) { result(m,4); return; }
+            bool b=n==1;
             if(c=='E') m->echo=b; else if(c=='V') m->verbose=b; else m->quiet=b;
         } else if(c=='Z' || c=='&') {
-            if(c=='&' && *p=='K' && m->advanced) {
+            if(c=='&' && m->usr_commands && (*p=='N' || *p=='U') && m->state==ZM_IDLE) {
+                char sub=*p++; n=0;
+                if(*p>='0' && *p<='9' && !decimal(&p,&n)) { result(m,4); return; }
+                if(n>16 && n!=38) { result(m,4); return; }
+                unsigned ceiling=sub=='N'?(unsigned)n:m->usr_ceiling;
+                unsigned floor=sub=='U'?(unsigned)n:m->usr_floor;
+                unsigned hi=ceiling==38?16:ceiling?ceiling-1:DEFAULT_MAX_PROFILE;
+                unsigned lo=floor==38?16:floor?floor-1:ceiling?hi:0;
+                if(lo>hi) { result(m,4); return; }
+                m->usr_ceiling=ceiling; m->usr_floor=floor;
+                m->min_profile=lo; m->max_profile=hi; m->adaptive=lo!=hi; continue;
+            }
+            if(c=='&' && *p=='V') {
+                p++; (void)zm_inquiry(m,4); (void)zm_inquiry(m,5); continue;
+            }
+            if(c=='&' && m->usr_commands && strchr("AHIKMB",*p) && *p) {
+                char sub=*p++; n=0;
+                if(*p>='0' && *p<='9' && !decimal(&p,&n)) { result(m,4); return; }
+                if(sub=='A' && n<=3) m->report_mode=(unsigned)n;
+                else if(sub=='H' && (n==0 || n==2)) m->flow_tx=n==2;
+                else if(sub=='I' && (n==0 || n==2)) m->flow_rx=n==2;
+                else if(sub=='K' && n<=3) m->compression=n!=0;
+                else if(sub=='M' && (n==4 || n==5)) { /* Always reliable. */ }
+                else if(sub=='B' && n==1) { /* UART is fixed at 115200. */ }
+                else { result(m,4); return; }
+                m->software_flow=m->flow_tx && m->flow_rx; continue;
+            }
+            if(c=='&' && *p=='K' && m->advanced && !m->usr_commands) {
                 p++;
                 if(*p=='?') { p++; snprintf(out,sizeof(out),"\r\n%u\r\n",m->software_flow?4:0); emit(m,out); continue; }
                 if(*p!='0' && *p!='4') { result(m,4); return; }
-                m->software_flow=*p++=='4'; continue;
+                m->software_flow=m->flow_tx=m->flow_rx=*p++=='4'; continue;
+            }
+            if(c=='&' && *p=='W') {
+                p++; n=0; if(*p>='0' && *p<='9' && !decimal(&p,&n)) { result(m,4); return; }
+                if(n>1 || !zm_save_profile(m,(unsigned)n)) { result(m,4); return; }
+                continue;
+            }
+            if(c=='&' && *p=='Y' && !m->usr_commands) {
+                p++; n=0; if(*p>='0' && *p<='9' && !decimal(&p,&n)) { result(m,4); return; }
+                if(n>1 || !zm_select_profile(m,(unsigned)n)) { result(m,4); return; }
+                continue;
+            }
+            if(c=='Z') {
+                n=0; if(*p>='0' && *p<='9' && !decimal(&p,&n)) { result(m,4); return; }
+                unsigned slot=m->boot_profile;
+                if(n>(m->usr_commands?5u:1u) || (m->usr_commands && n==4)) { result(m,4); return; }
+                if(m->usr_commands && n) slot=(unsigned)n-1;
+                else if(!m->usr_commands && n) slot=(unsigned)n;
+                close_call(m,false); defaults(m);
+                if(slot==4) m->software_flow=m->flow_tx=m->flow_rx=true;
+                else (void)zm_load_profile(m,slot);
+                continue;
             }
             if(c=='&' && *p++!='F') { result(m,4); return; }
-            if(*p=='0') p++;
+            n=0; if(*p>='0' && *p<='9' && !decimal(&p,&n)) { result(m,4); return; }
+            if(n!=0 && n!=2) { result(m,4); return; }
             close_call(m,false); defaults(m);
+            if(n==2) m->software_flow=m->flow_tx=m->flow_rx=true;
         } else if(c=='H') {
             if(*p=='0') p++;
             close_call(m,false);
@@ -279,14 +363,21 @@ static void command(struct zm_modem *m) {
             m->started=m->last_control=m->now; send(m,ZM_CALL); return;
         } else if(c=='S') {
             uint64_t reg;
-            if(!decimal(&p,&reg) || (reg!=0 && reg!=2 && reg!=7 && reg!=12)) { result(m,4); return; }
+            if(!decimal(&p,&reg) || (reg>5 && reg!=7 && reg!=12 && reg!=13 && reg!=19)) { result(m,4); return; }
             if(*p=='?') {
-                p++; unsigned v=reg==0?m->autoanswer:reg==2?m->escape_char:reg==7?m->dial_seconds:m->guard_ms/20;
+                p++; unsigned v=reg==0?m->autoanswer:reg==1?m->rings:reg==2?m->escape_char:
+                    reg==3?m->command_cr:reg==4?m->response_lf:reg==5?m->command_bs:reg==7?m->dial_seconds:
+                    reg==13?(m->escape_hangup?128u:0u):reg==19?m->inactivity_minutes:m->guard_ms/20;
                 snprintf(out,sizeof(out),"\r\n%u\r\n",v); emit(m,out);
-            } else if(*p++=='=' && decimal(&p,&n) && n<=255 && (reg==0 || reg==2 || n>0)) {
+            } else if(reg!=1 && *p++=='=' && decimal(&p,&n) && n<=255 && ((reg!=7 && reg!=12) || n>0) && (!(reg>=3 && reg<=5) || n<=127) && (reg!=13 || n==0 || n==128)) {
                 if(reg==0) m->autoanswer=(unsigned)n;
                 else if(reg==2) m->escape_char=(unsigned)n;
+                else if(reg==3) m->command_cr=(unsigned)n;
+                else if(reg==4) m->response_lf=(unsigned)n;
+                else if(reg==5) m->command_bs=(unsigned)n;
                 else if(reg==7) m->dial_seconds=(unsigned)n;
+                else if(reg==13) m->escape_hangup=n==128;
+                else if(reg==19) m->inactivity_minutes=(unsigned)n;
                 else m->guard_ms=(unsigned)n*20;
             } else { result(m,4); return; }
         } else { result(m,4); return; }
@@ -316,13 +407,17 @@ size_t zm_input(struct zm_modem *m, const uint8_t *data, size_t n) {
             }
             if(!flush_escape(m) || !enqueue(m,b)) break;
             m->last_input=m->now;
+            m->last_data_at=m->now;
         } else {
             if(m->echo && !m->io.serial(m->io.ctx,&b,1)) break;
-            if(b=='\r') {
+            if(b==m->command_cr) {
                 command(m); m->command_len=0; m->overflow=false;
-            } else if(b==8 || b==127) {
+            } else if(b=='/' && m->command_len==1 && (m->command[0]=='A' || m->command[0]=='a')) {
+                strcpy(m->command,m->last_command); m->command_len=strlen(m->command);
+                command(m); m->command_len=0; m->overflow=false;
+            } else if(b==m->command_bs || b==127) {
                 if(m->command_len) m->command_len--;
-            } else if(b!='\n') {
+            } else if(b!=m->response_lf) {
                 if(m->command_len<sizeof(m->command)-1) m->command[m->command_len++]=(char)b;
                 else m->overflow=true;
             }
@@ -334,7 +429,7 @@ static void drain_received(struct zm_modem *m) {
     while(m->online) {
         struct zm_slot *slot=&m->rx_window[m->rx_seq%ZM_WINDOW];
         if(!slot->used || slot->seq!=m->rx_seq || !m->io.serial(m->io.ctx,slot->data,slot->len)) break;
-        m->bytes_rx+=(uint32_t)slot->len; slot->used=false; m->rx_seq++;
+        m->bytes_rx+=(uint32_t)slot->len; m->last_data_at=m->now; slot->used=false; m->rx_seq++;
         if(!m->ack_pending) m->ack_at=m->now;
         m->ack_pending=true;
     }
@@ -367,7 +462,7 @@ void zm_receive(struct zm_modem *m, const uint8_t *f, size_t n) {
     bool survey=m->advanced && type==ZM_SURVEY;
     if(!src || src==m->number || !session || type<ZM_CALL || type>ZM_SURVEY ||
        (!caps && !probe && !survey && type!=ZM_DATA && n!=ZM_HEADER) || (type==ZM_DATA && n==ZM_HEADER)) return;
-    if(caps && (n!=ZM_HEADER+3 || f[ZM_HEADER]!=4 || f[ZM_HEADER+1]>=ZM_RATE_COUNT ||
+    if(caps && (n!=ZM_HEADER+3 || f[ZM_HEADER]!=5 || f[ZM_HEADER+1]>=ZM_RATE_COUNT ||
        f[ZM_HEADER+2]>f[ZM_HEADER+1] || f[ZM_HEADER+1]<m->min_profile || f[ZM_HEADER+2]>m->max_profile)) return;
     if(survey && n!=ZM_HEADER+4) return;
     m->frames_rx++;
@@ -492,6 +587,7 @@ void zm_tick(struct zm_modem *m, uint64_t now) {
         else if(now-m->last_control>=300) { send(m,ZM_CLOSE); m->last_control=now; }
         break;
     case ZM_CONNECTED:
+        if(m->inactivity_minutes && now-m->last_data_at>=(uint64_t)m->inactivity_minutes*60000) { close_call(m,true); break; }
         if(m->advanced && zm_survey_tick(m)) break;
         if(m->advanced) {
             drain_received(m);
@@ -500,7 +596,11 @@ void zm_tick(struct zm_modem *m, uint64_t now) {
         if(now-m->last_rx>=(m->advanced?30000u:10000u)) { m->last_fault=2; close_call(m,true); break; }
         if(now-m->last_ping>=1000+m->number%251) { send(m,ZM_PING); m->last_ping=now; }
         if(m->escape_count && now-m->escape_at>=m->guard_ms) {
-            if(m->escape_count==3) { m->escape_count=0; m->online=false; result(m,0); }
+            if(m->escape_count==3) {
+                m->escape_count=0;
+                if(m->escape_hangup) close_call(m,true);
+                else { m->online=false; result(m,0); }
+            }
             else (void)flush_escape(m);
         }
         if(m->recovering) break;

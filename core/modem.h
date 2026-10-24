@@ -10,7 +10,13 @@
 #define ZM_FRAME (ZM_HEADER + ZM_PAYLOAD)
 #define ZM_QUEUE 2048
 #define ZM_WINDOW 4
-#define ZM_RATE_COUNT 12
+#define ZM_RATE_COUNT 19
+#define ZM_PROFILE_SIZE 40
+struct zm_storage_ops {
+    void *ctx;
+    int (*read)(void *,unsigned,uint8_t *,size_t);
+    bool (*write)(void *,unsigned,const uint8_t *,size_t);
+};
 struct zm_slot { uint8_t data[ZM_PAYLOAD]; size_t len; uint32_t seq; uint64_t sent; bool used; };
 enum zm_state { ZM_IDLE, ZM_DIALING, ZM_RINGING, ZM_ANSWERING, ZM_CONNECTED, ZM_CLOSING };
 enum zm_type { ZM_CALL=1, ZM_ACCEPT, ZM_CONFIRM, ZM_BUSY, ZM_DATA, ZM_ACK,
@@ -41,12 +47,18 @@ struct zm_modem {
     uint32_t radio_errors;
     uint32_t radio_status;
     uint32_t radio_us, crypto_us, radio_bytes;
+    uint32_t firmware_crc;
+    bool firmware_crc_valid;
     int16_t last_rssi;
     bool secure_identity;
     uint8_t identity[16], peer_identity[16];
     struct zm_link_ops link;
     bool advanced, caller, training, recovering, compression, adaptive, connect_pending;
     bool software_flow;
+    bool flow_tx, flow_rx, usr_commands;
+    unsigned report_mode, result_level, boot_profile;
+    unsigned usr_ceiling, usr_floor;
+    struct zm_storage_ops storage;
     struct zm_slot tx_window[ZM_WINDOW], rx_window[ZM_WINDOW];
     uint32_t tx_base;
     bool ack_pending;
@@ -70,15 +82,31 @@ struct zm_modem {
     enum zm_state state;
     bool online, echo, verbose, quiet, inflight, overflow, serial_failed;
     unsigned autoanswer, rings, dial_seconds, guard_ms, escape_count, escape_char;
+    unsigned command_cr, response_lf, command_bs;
+    unsigned inactivity_minutes;
+    bool escape_hangup;
+    uint64_t last_data_at;
     uint8_t queue[ZM_QUEUE], pending[ZM_PAYLOAD];
     size_t qhead, qlen, pending_len;
     char command[128];
+    char last_command[128];
     size_t command_len;
 };
 void zm_init(struct zm_modem *, uint64_t number, uint64_t boot_nonce, struct zm_io);
 void zm_set_identity(struct zm_modem *,const uint8_t identity[16]);
 uint64_t zm_phone(const uint8_t identity[16]);
 void zm_enable_link(struct zm_modem *,struct zm_link_ops);
+void zm_set_storage(struct zm_modem *,struct zm_storage_ops);
+bool zm_save_profile(struct zm_modem *,unsigned);
+bool zm_load_profile(struct zm_modem *,unsigned);
+bool zm_select_profile(struct zm_modem *,unsigned);
+void zm_profile_encode(const struct zm_modem *,uint8_t[ZM_PROFILE_SIZE]);
+bool zm_profile_decode(struct zm_modem *,const uint8_t[ZM_PROFILE_SIZE]);
+bool zm_profile_valid(const uint8_t[ZM_PROFILE_SIZE]);
+unsigned zm_rate(unsigned);
+bool zm_inquiry(struct zm_modem *,unsigned);
+void zm_show_profile(struct zm_modem *,const uint8_t[ZM_PROFILE_SIZE]);
+void zm_emit(struct zm_modem *,const char *);
 void zm_tick(struct zm_modem *, uint64_t now);
 void zm_receive(struct zm_modem *, const uint8_t *, size_t);
 /* Returns bytes consumed; retain and retry the remainder for backpressure. */
