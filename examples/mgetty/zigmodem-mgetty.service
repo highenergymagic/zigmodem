@@ -1,0 +1,14 @@
+[Unit]
+Description=Zigmodem incoming radio modem login
+After=local-fs.target
+
+[Service]
+Type=simple
+# Replace the Python/repository paths and physical dongle by-id name.
+ExecStart=/opt/zigmodem/.venv/bin/python /opt/zigmodem/tools/mgetty_bridge.py /dev/serial/by-id/REPLACE_WITH_YOUR_DONGLE
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=25
+
+[Install]
+WantedBy=multi-user.target

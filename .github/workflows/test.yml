@@ -1,6 +1,13 @@
 name: Core tests
 on: [push, pull_request]
 jobs:
+  modem-bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m venv build-bridge
+      - run: build-bridge/bin/pip install pyserial==3.5
+      - run: build-bridge/bin/python tests/test_mgetty_bridge.py
   test:
     runs-on: ubuntu-latest
     strategy:

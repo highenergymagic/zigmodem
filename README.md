@@ -10,6 +10,11 @@ incompatible with earlier firmware; upgrade both endpoints.
 
 ## Use
 
+For terminal dial-in with a real Linux login prompt, see the
+[mgetty bridge setup and modem controls](docs/mgetty.md). It includes a
+systemd service example, bounded buffering, XON/XOFF, and explicit hangup
+on logout so the calling modem receives `NO CARRIER`.
+
 Open the USB serial port at **115200 baud, 8N1**, with hardware and software
 flow control disabled. Allow about half a second after opening: some USB
 bridge revisions reset the radio when the port opens. Keep the port open for
