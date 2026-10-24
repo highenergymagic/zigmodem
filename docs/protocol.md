@@ -90,7 +90,7 @@ Its header is 40 bytes and is never accepted directly over radio. The legacy
 PTY simulator exercises this core without encryption or advanced windowing.
 
 Types: CALL=1, ACCEPT=2, CONFIRM=3, BUSY=4, DATA=5, ACK=6, PING=7,
-PONG=8, CLOSE=9, CLOSED=10, WAIT=11, PROBE=12, PROBE_ACK=13, SURVEY=14. CALL/ACCEPT
+PONG=8, CLOSE=9, CLOSED=10, WAIT=11, PROBE=12, PROBE_ACK=13, SURVEY=14, POWER=15. CALL/ACCEPT
 carry version=5, maximum profile, minimum profile; DATA carries 1–64 bytes.
 
 CALL/ACCEPT repeat every 500 ms until confirmation. RING repeats every two
@@ -151,3 +151,27 @@ can temporarily separate the radios; ordinary asymmetric channel recovery
 reunites them. Scan timing is relative and guarded, not clock synchronization.
 `AT+SURVEY?` combined scores/counts are maintained by the caller; both endpoints
 count moves. Channel-change counters include temporary measurement retunes.
+
+
+## Transmit-power feedback
+
+POWER is an optional encrypted version-5 core message with exactly four payload
+bytes: format version (1), last received RSSI + 128 (0 means unknown/−128),
+retry/silence pressure (0/1), and sender's nominal applied TX power + 40.
+The core sequence field is zero; normal cumulative/selective acknowledgements
+remain in its header. Existing v5 peers that do not recognize POWER ignore it.
+It must match the active peer and call session before it can affect power.
+Feedback expires after six seconds. A peer can report quality but cannot set
+or exceed the local power ceiling. Fixed mode ignores adjustment requests.
+The 2-second reports and 4-second increase cooldown run outside survey slots;
+retry pressure with fresh RSSI above −60 dBm requests a survey without raising
+power, unless the peer has gone silent. Initial call and Noise-handshake
+timeouts can raise power before authenticated quality feedback is available.
+Decreases require 30 seconds of clean traffic, >=1024 acknowledged bytes per
+observation and reported RSSI >−70 dBm. RSSI alone never triggers a decrease.
+
+Saved profile format 2 retains the 40-byte record and CRC over bytes 0–35.
+Byte 28 is automatic (0/1), byte 29 is configured power/ceiling + 20, bytes
+30–35 remain zero. Format 1 loads with automatic control capped at +5 dBm.
+The instantaneous adapted power is not saved: automatic mode starts at the
+lower of +5 dBm and the configured ceiling.

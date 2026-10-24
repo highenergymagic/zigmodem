@@ -20,13 +20,14 @@ struct zm_storage_ops {
 struct zm_slot { uint8_t data[ZM_PAYLOAD]; size_t len; uint32_t seq; uint64_t sent; bool used; };
 enum zm_state { ZM_IDLE, ZM_DIALING, ZM_RINGING, ZM_ANSWERING, ZM_CONNECTED, ZM_CLOSING };
 enum zm_type { ZM_CALL=1, ZM_ACCEPT, ZM_CONFIRM, ZM_BUSY, ZM_DATA, ZM_ACK,
-               ZM_PING, ZM_PONG, ZM_CLOSE, ZM_CLOSED, ZM_WAIT, ZM_PROBE, ZM_PROBE_ACK, ZM_SURVEY };
+               ZM_PING, ZM_PONG, ZM_CLOSE, ZM_CLOSED, ZM_WAIT, ZM_PROBE, ZM_PROBE_ACK, ZM_SURVEY, ZM_POWER };
 struct zm_link_ops {
     void *ctx;
     bool (*channel)(void *,unsigned);
     bool (*pin)(void *,const uint8_t[16]);
     bool (*lookup)(void *,unsigned,uint8_t[16]);
     int (*energy)(void *,unsigned);
+    bool (*power)(void *,int);
 };
 /* Callbacks are synchronous and must not reenter the modem. Serial must accept
  * the entire buffer or none; radio may drop a frame (the protocol retries).
@@ -50,6 +51,10 @@ struct zm_modem {
     uint32_t firmware_crc;
     bool firmware_crc_valid;
     int16_t last_rssi;
+    int tx_power, power_ceiling, peer_rssi, peer_power;
+    bool power_auto, power_pressure;
+    uint64_t power_at, power_changed, power_good, power_feedback, power_handshake_at;
+    uint32_t power_retries, power_acked, power_changes, power_errors;
     bool secure_identity;
     uint8_t identity[16], peer_identity[16];
     struct zm_link_ops link;
@@ -118,4 +123,7 @@ void zm_control(struct zm_modem *,unsigned,uint32_t,const uint8_t *,size_t);
 void zm_retrain(struct zm_modem *);
 bool zm_survey_tick(struct zm_modem *);
 void zm_survey_receive(struct zm_modem *,uint32_t,const uint8_t *);
+bool zm_power_config(struct zm_modem *,bool,int);
+void zm_power_tick(struct zm_modem *);
+void zm_power_receive(struct zm_modem *,const uint8_t *);
 #endif

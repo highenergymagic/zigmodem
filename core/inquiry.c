@@ -14,6 +14,7 @@ void zm_show_profile(struct zm_modem *m,const uint8_t p[ZM_PROFILE_SIZE]) {
         "S0=%u S2=%u S3=%u S4=%u S5=%u S7=%u S12=%u S13=%u S19=%u +MS=%u,%u,%u\r\n",
         p[12]?"USR":"NATIVE",p[4],p[5],p[6],p[20],p[19],p[7],p[8],p[9],p[11],
         p[13],p[14],p[21],p[22],p[23],p[15],p[16],p[25]?128:0,p[24],p[10],zm_rate(p[17]),zm_rate(p[18])); text(m,s);
+    snprintf(s,sizeof(s),"POWER=%s,%d dBm\r\n",p[3]==1 || p[28]?"AUTO":"FIXED",p[3]==1?5:(int)p[29]-20); text(m,s);
 }
 bool zm_inquiry(struct zm_modem *m,unsigned id) {
     char s[240]; uint8_t p[ZM_PROFILE_SIZE];

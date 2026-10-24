@@ -11,6 +11,10 @@
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/sys/byteorder.h>
 #include <string.h>
+#if defined(CONFIG_SOC_CC2652P)
+#include <driverlib/ioc.h>
+#include <driverlib/gpio.h>
+#endif
 
 #define MAC_HEADER 15
 #define PAN 0x5a4d
@@ -208,6 +212,20 @@ static bool change_channel(void *ctx,unsigned channel) {
     if(result==0 && restarted==0) { tx_fail_streak=0; return true; }
     return false;
 }
+static bool change_power(void *ctx,int dbm) {
+    ARG_UNUSED(ctx);
+    if(api->set_txpower(radio,(int16_t)dbm)) return false;
+#if defined(CONFIG_SOC_CC2652P)
+    /* Route the high PA only during TX; leave RX on the standard path. */
+    if(dbm>5) IOCPortConfigureSet(29,IOC_PORT_RFC_GPO3,IOC_STD_OUTPUT);
+    else {
+        GPIO_clearDio(29);
+        IOCPortConfigureSet(29,IOC_PORT_GPIO,IOC_STD_OUTPUT);
+        GPIO_setOutputEnableDio(29,GPIO_OUTPUT_ENABLE);
+    }
+#endif
+    return true;
+}
 static void fatal(const char *s) {
     while(*s) uart_poll_out(uart,*s++);
     for(;;) k_sleep(K_SECONDS(1));
@@ -231,7 +249,7 @@ int main(void) {
     if(api->filter(radio,true,IEEE802154_FILTER_TYPE_SHORT_ADDR,&filter)) fatal("\r\nADDRESS ERROR\r\n");
     if(api->set_channel(radio,CHANNEL) || api->set_txpower(radio,5) || api->start(radio))
         fatal("\r\nRADIO START ERROR\r\n");
-    zm_enable_link(&modem,(struct zm_link_ops){NULL,change_channel,identity_trust,identity_lookup,measure_energy});
+    zm_enable_link(&modem,(struct zm_link_ops){NULL,change_channel,identity_trust,identity_lookup,measure_energy,change_power});
     zm_set_storage(&modem,(struct zm_storage_ops){NULL,settings_read,settings_write});
 #if defined(CONFIG_UART_SILABS_USART_ASYNC)
     dma_next=1;

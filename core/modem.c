@@ -16,6 +16,7 @@ static void train(struct zm_modem *m) {
 }
 void zm_enable_link(struct zm_modem *m,struct zm_link_ops link) {
     m->advanced=true; m->link=link; m->channel=25; m->max_profile=m->peer_max=DEFAULT_MAX_PROFILE;
+    m->tx_power=m->power_ceiling=5; m->power_auto=true;
     m->profile=2; m->adaptive=true; m->compression=true; m->survey_enabled=true;
 }
 
@@ -117,6 +118,7 @@ static void defaults(struct zm_modem *m) {
     m->command_cr=13; m->response_lf=10; m->command_bs=8;
     m->inactivity_minutes=0; m->escape_hangup=false;
     m->usr_ceiling=m->usr_floor=0;
+    if(m->link.power) (void)zm_power_config(m,true,5);
     if(m->advanced) { m->min_profile=0; m->max_profile=DEFAULT_MAX_PROFILE; m->adaptive=true; m->compression=true; }
 }
 void zm_init(struct zm_modem *m, uint64_t number, uint64_t nonce, struct zm_io io) {
@@ -169,7 +171,19 @@ static void command(struct zm_modem *m) {
         char c=*p++;
         if(c==' ') continue;
         if(c=='+') {
-            if(strcmp(p,"COMPAT?")==0) { emit(m,m->usr_commands?"\r\nUSR\r\n":"\r\nNATIVE\r\n"); p+=strlen(p);
+            if(strcmp(p,"POWER?")==0 && m->link.power) {
+                snprintf(out,sizeof(out),"\r\nAUTO=%u DBM=%d MAX=%d PEER_RSSI=%d PEER_DBM=%d FRESH=%u CHANGES=%" PRIu32 " ERRORS=%" PRIu32 "\r\n",
+                         m->power_auto,m->tx_power,m->power_ceiling,m->peer_rssi,m->peer_power,
+                         m->power_feedback && m->now-m->power_feedback<6000,m->power_changes,m->power_errors);
+                emit(m,out); p+=strlen(p);
+            } else if(strcmp(p,"POWER=?")==0 && m->link.power) {
+                emit(m,"\r\nAUTO|FIXED,-20|-15|-10|-5|0|5|14|17|20\r\n"); p+=strlen(p);
+            } else if(strncmp(p,"POWER=",6)==0 && m->link.power) {
+                p+=6; bool automatic=strncmp(p,"AUTO,",5)==0;
+                if(!automatic && strncmp(p,"FIXED,",6)!=0) { result(m,4); return; }
+                p+=automatic?5:6; bool negative=*p=='-'; if(negative) p++;
+                if(!decimal(&p,&n) || *p || n>20 || !zm_power_config(m,automatic,negative?-(int)n:(int)n)) { result(m,4); return; }
+            } else if(strcmp(p,"COMPAT?")==0) { emit(m,m->usr_commands?"\r\nUSR\r\n":"\r\nNATIVE\r\n"); p+=strlen(p);
             } else if((strcmp(p,"COMPAT=USR")==0 || strcmp(p,"COMPAT=NATIVE")==0) && m->state==ZM_IDLE) {
                 m->usr_commands=p[7]=='U'; p+=strlen(p);
             } else if(strcmp(p,"GMI")==0 || strcmp(p,"GMI?")==0) { emit(m,"\r\nHigh Energy Magic\r\n"); p+=strlen(p);
@@ -460,11 +474,12 @@ void zm_receive(struct zm_modem *m, const uint8_t *f, size_t n) {
     bool caps=m->advanced && (type==ZM_CALL || type==ZM_ACCEPT);
     bool probe=m->advanced && type==ZM_PROBE;
     bool survey=m->advanced && type==ZM_SURVEY;
-    if(!src || src==m->number || !session || type<ZM_CALL || type>ZM_SURVEY ||
-       (!caps && !probe && !survey && type!=ZM_DATA && n!=ZM_HEADER) || (type==ZM_DATA && n==ZM_HEADER)) return;
+    bool power=m->advanced && type==ZM_POWER;
+    if(!src || src==m->number || !session || type<ZM_CALL || type>ZM_POWER ||
+       (!caps && !probe && !survey && !power && type!=ZM_DATA && n!=ZM_HEADER) || (type==ZM_DATA && n==ZM_HEADER)) return;
     if(caps && (n!=ZM_HEADER+3 || f[ZM_HEADER]!=5 || f[ZM_HEADER+1]>=ZM_RATE_COUNT ||
        f[ZM_HEADER+2]>f[ZM_HEADER+1] || f[ZM_HEADER+1]<m->min_profile || f[ZM_HEADER+2]>m->max_profile)) return;
-    if(survey && n!=ZM_HEADER+4) return;
+    if((survey || power) && n!=ZM_HEADER+4) return;
     m->frames_rx++;
     if(type==ZM_CALL) {
         if(m->state==ZM_IDLE) {
@@ -504,6 +519,7 @@ void zm_receive(struct zm_modem *m, const uint8_t *f, size_t n) {
     m->last_rx=m->now;
     if(m->recovering) { m->recovering=false; train(m); }
     if(m->advanced) acknowledge(m,f);
+    if(power) { zm_power_receive(m,f+ZM_HEADER); return; }
     if(survey) { zm_survey_receive(m,seq,f+ZM_HEADER); return; }
     if(type==ZM_PROBE && m->advanced) { send_to(m,ZM_PROBE_ACK,m->peer,m->session,seq,NULL,0); return; }
     if(type==ZM_PROBE_ACK && m->training && seq>m->probe_base && seq-m->probe_base<=m->probes) {
@@ -552,6 +568,7 @@ static uint32_t retry_delay(struct zm_modem *m) {
 }
 void zm_tick(struct zm_modem *m, uint64_t now) {
     m->now=now;
+    zm_power_tick(m);
     if(m->advanced && m->link.channel) {
         if(m->state==ZM_IDLE && m->channel!=25 && m->link.channel(m->link.ctx,25)) {
             m->channel=25; m->channel_index=0; m->channel_at=now;

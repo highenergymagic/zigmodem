@@ -63,6 +63,9 @@ explicit `AT+MS` setting and remain experimental; 56k has not been established.
 | `AT+SURVEY?` | Caller’s combined energy measurements, ages and move count |
 | `AT+SCAN`, `AT+SCAN=0/1` | Request a survey / disable or enable caller-initiated surveys |
 | `AT+PERF?` | Cumulative transmit radio/crypto microseconds and radio bytes |
+| `AT+POWER?`, `AT+POWER=?` | Applied TX power, ceiling, peer feedback, changes/errors / allowed settings |
+| `AT+POWER=AUTO,20` | Start at +5 dBm, adapt up to the explicitly selected +20 dBm ceiling |
+| `AT+POWER=FIXED,-20` | Hold a fixed power for controlled attenuation tests |
 | `AT+PHONUM?` | Ten-digit decimal phone number |
 | `AT+IDENT?` | Full 128-bit public-key fingerprint, 32 hex digits |
 | `AT+PIN=<fingerprint>` | Store a verified peer identity; refuse conflicting existing pins |
@@ -104,6 +107,35 @@ strength in dBm (zero before any frame). Counters survive hangup, not reset.
 On TI, `STATUS` contains the hexadecimal CSMA status followed by TX status:
 `24002400` means both succeeded; `24010000` means channel busy, TX not started.
 On Silicon Labs this diagnostic field is zero.
+
+Power control defaults to automatic with a **+5 dBm ceiling**. Select a higher
+ceiling only for an appropriate regional/antenna configuration. On each modem,
+`AT+POWER=AUTO,20` enables the full supported range; `AT&W0` saves that policy.
+The supported settings are −20, −15, −10, −5, 0, 5, 14, 17 and 20 dBm.
+These are nominal conducted output settings, not measured EIRP. The TI high PA
+requires its own override tables and automatic DIO29 antenna-path switching.
+Settings survive `ATZ`/reboot when saved; old profiles load as automatic, max +5.
+
+Every two seconds each connected modem sends encrypted quality feedback.
+Repeated retries or peer silence prompt a channel survey. Weak (≤−60 dBm),
+missing or stale peer feedback permits a power increase at most every four
+seconds; fresh strong-signal feedback favours a survey without increasing
+power, unless the peer has gone silent. Thirty seconds of clean acknowledged
+traffic with fresh peer feedback and RSSI above −70 dBm permits one decrease.
+Survey slots suspend power decisions. Idle periods alone never justify a
+decrease; absent/stale peer feedback cannot authorize one. Each direction
+adapts independently, and calling/answering can raise power before feedback
+exists. The existing rate fallback remains active. Calls return to the
+starting power once idle. Fixed mode never changes power automatically.
+
+For a stationary test, disable surveys (`AT+SCAN=0`) and lower fixed power on
+both ends, then restore `AT+SCAN=1` and automatic power. This adds signal loss,
+not actual distance, multipath or a different interference environment.
+[`tools/power_sweep.py`](tools/power_sweep.py) performs byte-verified transfers
+in each direction at several fixed settings, followed by automatic operation.
+It requires exclusive serial access at both ends and restores saved profiles.
+See the [stationary power qualification](docs/power-qualification.md) for
+measured results and the limits of this test.
 
 ## Encryption, training, compression, and recovery
 

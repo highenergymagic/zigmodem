@@ -8,7 +8,7 @@ static uint32_t checksum(const uint8_t *p,size_t n) {
     return ~c;
 }
 void zm_profile_encode(const struct zm_modem *m,uint8_t p[ZM_PROFILE_SIZE]) {
-    memset(p,0,ZM_PROFILE_SIZE); memcpy(p,"ZMP",3); p[3]=1;
+    memset(p,0,ZM_PROFILE_SIZE); memcpy(p,"ZMP",3); p[3]=2;
     p[4]=m->echo; p[5]=m->verbose; p[6]=m->quiet;
     p[7]=m->flow_tx; p[8]=m->flow_rx; p[9]=m->compression;
     p[10]=m->adaptive; p[11]=m->survey_enabled; p[12]=m->usr_commands;
@@ -19,14 +19,19 @@ void zm_profile_encode(const struct zm_modem *m,uint8_t p[ZM_PROFILE_SIZE]) {
     p[21]=(uint8_t)m->command_cr; p[22]=(uint8_t)m->response_lf; p[23]=(uint8_t)m->command_bs;
     p[24]=(uint8_t)m->inactivity_minutes; p[25]=m->escape_hangup;
     p[26]=(uint8_t)m->usr_ceiling; p[27]=(uint8_t)m->usr_floor;
+    p[28]=m->power_auto; p[29]=(uint8_t)(m->power_ceiling+20);
     uint32_t c=checksum(p,36);
     for(unsigned i=0;i<4;i++) p[36+i]=(uint8_t)(c>>(8*i));
 }
 bool zm_profile_valid(const uint8_t p[ZM_PROFILE_SIZE]) {
     uint32_t c=0; for(unsigned i=0;i<4;i++) c|=(uint32_t)p[36+i]<<(8*i);
-    if(memcmp(p,"ZMP",3) || p[3]!=1 || c!=checksum(p,36)) return false;
+    if(memcmp(p,"ZMP",3) || (p[3]!=1 && p[3]!=2) || c!=checksum(p,36)) return false;
     for(unsigned i=4;i<=12;i++) if(p[i]>1) return false;
-    for(unsigned i=28;i<36;i++) if(p[i]) return false;
+    for(unsigned i=p[3]==1?28:30;i<36;i++) if(p[i]) return false;
+    if(p[3]==2) {
+        if(p[28]>1) return false;
+        switch(p[29]) { case 0: case 5: case 10: case 15: case 20: case 25: case 34: case 37: case 40: break; default:return false; }
+    }
     if((p[26]>16 && p[26]!=38) || (p[27]>16 && p[27]!=38)) return false;
     if(p[25]>1) return false;
     for(unsigned i=21;i<24;i++) if(p[i]>127) return false;
@@ -35,6 +40,9 @@ bool zm_profile_valid(const uint8_t p[ZM_PROFILE_SIZE]) {
 }
 bool zm_profile_decode(struct zm_modem *m,const uint8_t p[ZM_PROFILE_SIZE]) {
     if(!zm_profile_valid(p)) return false;
+    bool automatic=p[3]==1 || p[28]; int ceiling=p[3]==1?5:(int)p[29]-20;
+    if(m->link.power && !zm_power_config(m,automatic,ceiling)) return false;
+    m->power_auto=automatic; m->power_ceiling=ceiling;
     m->echo=p[4]; m->verbose=p[5]; m->quiet=p[6];
     m->flow_tx=p[7]; m->flow_rx=p[8]; m->software_flow=m->flow_tx && m->flow_rx;
     m->compression=p[9]; m->adaptive=p[10]; m->survey_enabled=p[11]; m->usr_commands=p[12];
